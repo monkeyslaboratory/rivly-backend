@@ -27,7 +27,11 @@ class JobListCreateView(generics.ListCreateAPIView):
         return Job.objects.filter(team_id__in=team_ids)
 
     def perform_create(self, serializer):
-        serializer.save()
+        membership = TeamMember.objects.filter(user=self.request.user).first()
+        if membership is None:
+            from rest_framework.exceptions import ValidationError
+            raise ValidationError({'team': 'User does not belong to any team.'})
+        serializer.save(team=membership.team)
 
 
 class JobDetailView(generics.RetrieveUpdateDestroyAPIView):
@@ -40,6 +44,21 @@ class JobDetailView(generics.RetrieveUpdateDestroyAPIView):
             user=self.request.user
         ).values_list('team_id', flat=True)
         return Job.objects.filter(team_id__in=team_ids)
+
+
+class CompetitorCreateView(generics.CreateAPIView):
+    serializer_class = CompetitorSerializer
+    permission_classes = [IsAuthenticated]
+
+    def perform_create(self, serializer):
+        job_id = self.kwargs['pk']
+        team_ids = TeamMember.objects.filter(user=self.request.user).values_list('team_id', flat=True)
+        try:
+            job = Job.objects.get(pk=job_id, team_id__in=team_ids)
+        except Job.DoesNotExist:
+            from rest_framework.exceptions import NotFound
+            raise NotFound('Job not found.')
+        serializer.save(job=job)
 
 
 class JobTriggerRunView(APIView):

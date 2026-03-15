@@ -11,6 +11,7 @@ class CompetitorSerializer(serializers.ModelSerializer):
 
 class JobSerializer(serializers.ModelSerializer):
     competitors = CompetitorSerializer(many=True, read_only=True)
+    team = serializers.PrimaryKeyRelatedField(read_only=True)
 
     class Meta:
         model = Job
@@ -20,7 +21,7 @@ class JobSerializer(serializers.ModelSerializer):
             'device_type', 'notify_email', 'notify_slack', 'slack_webhook_url',
             'areas', 'competitors', 'created_at', 'updated_at',
         ]
-        read_only_fields = ['id', 'created_at', 'updated_at']
+        read_only_fields = ['id', 'team', 'created_at', 'updated_at']
 
 
 class AnalyzeProductRequestSerializer(serializers.Serializer):
