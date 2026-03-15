@@ -5,21 +5,33 @@ from .models import Run, RunScreenshot, RunReport, RunOverallScore
 class RunScreenshotSerializer(serializers.ModelSerializer):
     class Meta:
         model = RunScreenshot
-        fields = ['id', 'competitor', 'image_url', 'device_type', 'page_title', 'captured_at']
-        read_only_fields = ['id', 'captured_at']
+        fields = [
+            'id', 'competitor', 'page_url', 'page_name', 'device_type',
+            's3_key', 'thumbnail_s3_key', 'viewport_width', 'viewport_height',
+            'dom_text', 'html_snippet', 'status', 'error_message', 'created_at',
+        ]
+        read_only_fields = ['id', 'created_at']
 
 
 class RunReportSerializer(serializers.ModelSerializer):
     class Meta:
         model = RunReport
-        fields = ['id', 'competitor', 'area', 'score', 'summary', 'details', 'created_at']
+        fields = [
+            'id', 'competitor', 'category', 'score', 'score_breakdown',
+            'summary', 'details', 'recommendations',
+            'previous_report', 'previous_score', 'score_delta', 'created_at',
+        ]
         read_only_fields = ['id', 'created_at']
 
 
 class RunOverallScoreSerializer(serializers.ModelSerializer):
     class Meta:
         model = RunOverallScore
-        fields = ['id', 'competitor', 'score', 'rank', 'created_at']
+        fields = [
+            'id', 'competitor', 'overall_score',
+            'previous_overall_score', 'score_delta',
+            'category_scores', 'top_insights', 'created_at',
+        ]
         read_only_fields = ['id', 'created_at']
 
 
@@ -31,8 +43,10 @@ class RunSerializer(serializers.ModelSerializer):
     class Meta:
         model = Run
         fields = [
-            'id', 'job', 'status', 'started_at', 'completed_at',
-            'error_message', 'screenshots', 'reports', 'overall_scores', 'created_at',
+            'id', 'job', 'triggered_by', 'status', 'progress', 'current_phase',
+            'started_at', 'completed_at', 'duration_seconds', 'cost_api_usd',
+            'error_log', 'retry_count',
+            'screenshots', 'reports', 'overall_scores', 'created_at',
         ]
         read_only_fields = ['id', 'created_at']
 
@@ -41,5 +55,9 @@ class RunListSerializer(serializers.ModelSerializer):
     """Lighter serializer for list views without nested relations."""
     class Meta:
         model = Run
-        fields = ['id', 'job', 'status', 'started_at', 'completed_at', 'error_message', 'created_at']
+        fields = [
+            'id', 'job', 'triggered_by', 'status', 'progress', 'current_phase',
+            'started_at', 'completed_at', 'duration_seconds', 'cost_api_usd',
+            'error_log', 'retry_count', 'created_at',
+        ]
         read_only_fields = ['id', 'created_at']

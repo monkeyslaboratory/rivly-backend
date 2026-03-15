@@ -32,4 +32,6 @@ class RunDetailView(generics.RetrieveAPIView):
         team_ids = TeamMember.objects.filter(
             user=self.request.user
         ).values_list('team_id', flat=True)
-        return Run.objects.filter(job__team_id__in=team_ids)
+        return Run.objects.prefetch_related(
+            'screenshots', 'reports', 'overall_scores'
+        ).filter(job__team_id__in=team_ids)

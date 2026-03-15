@@ -3,7 +3,9 @@ from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 
+import os
 from apps.accounts.models import TeamMember
+from apps.runs.models import Run
 from .models import Job, Competitor
 from .serializers import (
     JobSerializer,
@@ -38,6 +40,31 @@ class JobDetailView(generics.RetrieveUpdateDestroyAPIView):
             user=self.request.user
         ).values_list('team_id', flat=True)
         return Job.objects.filter(team_id__in=team_ids)
+
+
+class JobTriggerRunView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, pk):
+        team_ids = TeamMember.objects.filter(user=request.user).values_list('team_id', flat=True)
+        try:
+            job = Job.objects.get(pk=pk, team_id__in=team_ids)
+        except Job.DoesNotExist:
+            return Response({'detail': 'Job not found.'}, status=status.HTTP_404_NOT_FOUND)
+
+        run = Run.objects.create(job=job, triggered_by=request.user)
+
+        # Use Celery if available, otherwise run synchronously for local dev
+        use_sync = os.environ.get('RUN_SYNC', 'true').lower() == 'true'
+        if use_sync:
+            from apps.runs.tasks import execute_run
+            execute_run(str(run.id))
+        else:
+            from apps.runs.tasks import execute_run
+            execute_run.delay(str(run.id))
+
+        from apps.runs.serializers import RunSerializer
+        return Response(RunSerializer(run).data, status=status.HTTP_201_CREATED)
 
 
 class AnalyzeProductView(APIView):

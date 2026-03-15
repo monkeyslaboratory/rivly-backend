@@ -5,72 +5,86 @@ from apps.jobs.models import Job, Competitor
 
 class Run(models.Model):
     class Status(models.TextChoices):
-        QUEUED = 'queued', 'Queued'
-        RUNNING = 'running', 'Running'
-        COMPLETED = 'completed', 'Completed'
-        FAILED = 'failed', 'Failed'
+        QUEUED = "queued"
+        PREFLIGHT = "preflight"
+        SCREENSHOTS = "screenshots"
+        ANALYZING = "analyzing"
+        SCORING = "scoring"
+        COMPLETED = "completed"
+        PARTIAL = "partial"
+        FAILED = "failed"
+        CANCELLED = "cancelled"
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    job = models.ForeignKey(Job, on_delete=models.CASCADE, related_name='runs')
+    job = models.ForeignKey(Job, on_delete=models.CASCADE, related_name="runs")
+    triggered_by = models.ForeignKey("accounts.User", on_delete=models.SET_NULL, null=True, blank=True)
     status = models.CharField(max_length=20, choices=Status.choices, default=Status.QUEUED)
+    progress = models.IntegerField(default=0)
+    current_phase = models.CharField(max_length=50, blank=True, default="")
     started_at = models.DateTimeField(null=True, blank=True)
     completed_at = models.DateTimeField(null=True, blank=True)
-    error_message = models.TextField(blank=True, default='')
+    duration_seconds = models.IntegerField(null=True, blank=True)
+    cost_api_usd = models.DecimalField(max_digits=10, decimal_places=4, default=0)
+    error_log = models.TextField(blank=True, default="")
+    retry_count = models.IntegerField(default=0)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
-        db_table = 'runs'
-        ordering = ['-created_at']
-
-    def __str__(self):
-        return f'Run {self.id} - {self.job.name} ({self.status})'
+        db_table = "runs"
+        ordering = ["-created_at"]
 
 
 class RunScreenshot(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    run = models.ForeignKey(Run, on_delete=models.CASCADE, related_name='screenshots')
-    competitor = models.ForeignKey(Competitor, on_delete=models.CASCADE, related_name='screenshots')
-    image_url = models.URLField()
-    device_type = models.CharField(max_length=20, default='desktop')
-    page_title = models.CharField(max_length=500, blank=True, default='')
-    captured_at = models.DateTimeField(auto_now_add=True)
+    run = models.ForeignKey(Run, on_delete=models.CASCADE, related_name="screenshots")
+    competitor = models.ForeignKey(Competitor, on_delete=models.CASCADE, related_name="screenshots")
+    page_url = models.URLField()
+    page_name = models.CharField(max_length=100)
+    device_type = models.CharField(max_length=10)
+    s3_key = models.CharField(max_length=512)
+    thumbnail_s3_key = models.CharField(max_length=512, blank=True, default="")
+    viewport_width = models.IntegerField()
+    viewport_height = models.IntegerField()
+    dom_text = models.TextField(blank=True, default="")
+    html_snippet = models.TextField(blank=True, default="")
+    status = models.CharField(max_length=20, default="success")
+    error_message = models.TextField(blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
-        db_table = 'run_screenshots'
-
-    def __str__(self):
-        return f'Screenshot {self.id} - {self.competitor.name}'
+        db_table = "run_screenshots"
 
 
 class RunReport(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    run = models.ForeignKey(Run, on_delete=models.CASCADE, related_name='reports')
-    competitor = models.ForeignKey(Competitor, on_delete=models.CASCADE, related_name='reports')
-    area = models.CharField(max_length=100)
-    score = models.IntegerField(default=0, help_text='Score 0-100')
-    summary = models.TextField(blank=True, default='')
-    details = models.JSONField(default=dict)
+    run = models.ForeignKey(Run, on_delete=models.CASCADE, related_name="reports")
+    competitor = models.ForeignKey(Competitor, on_delete=models.CASCADE, related_name="reports")
+    category = models.CharField(max_length=100)
+    score = models.IntegerField(default=0)
+    score_breakdown = models.JSONField(default=dict)
+    summary = models.TextField(default="")
+    details = models.JSONField(default=list)
+    recommendations = models.JSONField(default=list)
+    previous_report = models.ForeignKey("self", on_delete=models.SET_NULL, null=True, blank=True, related_name="next_report")
+    previous_score = models.IntegerField(null=True, blank=True)
+    score_delta = models.IntegerField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
-        db_table = 'run_reports'
-        unique_together = ('run', 'competitor', 'area')
-
-    def __str__(self):
-        return f'{self.competitor.name} - {self.area}: {self.score}'
+        db_table = "run_reports"
 
 
 class RunOverallScore(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    run = models.ForeignKey(Run, on_delete=models.CASCADE, related_name='overall_scores')
-    competitor = models.ForeignKey(Competitor, on_delete=models.CASCADE, related_name='overall_scores')
-    score = models.IntegerField(default=0, help_text='Overall score 0-100')
-    rank = models.IntegerField(default=0)
+    run = models.ForeignKey(Run, on_delete=models.CASCADE, related_name="overall_scores")
+    competitor = models.ForeignKey(Competitor, on_delete=models.CASCADE, related_name="overall_scores")
+    overall_score = models.IntegerField()
+    previous_overall_score = models.IntegerField(null=True, blank=True)
+    score_delta = models.IntegerField(null=True, blank=True)
+    category_scores = models.JSONField(default=dict)
+    top_insights = models.JSONField(default=list)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
-        db_table = 'run_overall_scores'
-        unique_together = ('run', 'competitor')
-
-    def __str__(self):
-        return f'{self.competitor.name} - Overall: {self.score} (Rank {self.rank})'
+        db_table = "run_overall_scores"
+        unique_together = ("run", "competitor")
