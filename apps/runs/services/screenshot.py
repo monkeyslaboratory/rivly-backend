@@ -41,97 +41,123 @@ SKIP_PATTERNS = [
 def discover_from_sitemap(origin: str) -> list:
     """
     Parse sitemap.xml (and sitemaps referenced in robots.txt) to find all pages.
+    Handles: redirects, multiple sitemaps, sitemap indexes, cross-domain sitemaps.
     Returns list of {'name': ..., 'url': ...}.
     """
     sitemap_urls = []
+    # Track the actual domain(s) we find in sitemaps (may differ from origin)
+    allowed_hosts = set()
+    origin_host = urlparse(origin).hostname
+    allowed_hosts.add(origin_host)
+    if origin_host.startswith('www.'):
+        allowed_hosts.add(origin_host[4:])
+    else:
+        allowed_hosts.add(f'www.{origin_host}')
 
-    # Step 1: Check robots.txt for sitemap references
+    # Step 1: Check robots.txt for sitemap references (follow redirects!)
     try:
-        resp = requests.get(f"{origin}/robots.txt", timeout=10,
+        resp = requests.get(f"{origin}/robots.txt", timeout=10, allow_redirects=True,
                            headers={'User-Agent': 'Mozilla/5.0'})
         if resp.status_code == 200:
             for line in resp.text.splitlines():
                 line = line.strip()
                 if line.lower().startswith('sitemap:'):
-                    sitemap_url = line.split(':', 1)[1].strip()
+                    # Extract URL — everything after "Sitemap:" (case-insensitive)
+                    sitemap_url = re.sub(r'^sitemap:\s*', '', line, flags=re.IGNORECASE).strip()
                     if sitemap_url.startswith('//'):
                         sitemap_url = 'https:' + sitemap_url
-                    sitemap_urls.append(sitemap_url)
+                    if sitemap_url.startswith('http'):
+                        sitemap_urls.append(sitemap_url)
+                        # Allow the sitemap's domain too
+                        smap_host = urlparse(sitemap_url).hostname
+                        if smap_host:
+                            allowed_hosts.add(smap_host)
+                            if smap_host.startswith('www.'):
+                                allowed_hosts.add(smap_host[4:])
+                            else:
+                                allowed_hosts.add(f'www.{smap_host}')
+            logger.info(f"robots.txt sitemaps: {sitemap_urls}")
     except Exception as e:
         logger.debug(f"robots.txt fetch failed: {e}")
 
-    # Step 2: Try standard sitemap locations
+    # Step 2: Try standard sitemap locations if robots.txt had none
     if not sitemap_urls:
         sitemap_urls = [
             f"{origin}/sitemap.xml",
             f"{origin}/sitemap_index.xml",
-            f"{origin}/sitemap/sitemap.xml",
         ]
 
-    # Step 3: Parse sitemaps
+    # Step 3: Parse all sitemaps recursively
     all_urls = []
     parsed_sitemaps = set()
 
+    def _find_loc(element) -> str:
+        """Extract <loc> text from an element, handling namespaces."""
+        # Try direct children
+        for child in element:
+            tag = child.tag.split('}')[-1] if '}' in child.tag else child.tag
+            if tag.lower() == 'loc' and child.text:
+                return child.text.strip()
+        return ''
+
     def parse_sitemap(url: str, depth: int = 0):
-        if depth > 2 or url in parsed_sitemaps:
+        if depth > 3 or url in parsed_sitemaps:
             return
         parsed_sitemaps.add(url)
 
         try:
-            resp = requests.get(url, timeout=10,
+            resp = requests.get(url, timeout=15, allow_redirects=True,
                                headers={'User-Agent': 'Mozilla/5.0'})
             if resp.status_code != 200:
+                logger.debug(f"Sitemap {url}: HTTP {resp.status_code}")
                 return
 
-            # Remove XML namespace for easier parsing
-            content = re.sub(r'\sxmlns="[^"]+"', '', resp.text, count=1)
+            content = resp.text
+            # Remove XML namespace declarations for simpler parsing
+            content = re.sub(r'\sxmlns[^"]*"[^"]*"', '', content)
 
             try:
                 root = ET.fromstring(content)
-            except ET.ParseError:
+            except ET.ParseError as e:
+                logger.debug(f"XML parse error for {url}: {e}")
                 return
 
-            tag = root.tag.split('}')[-1] if '}' in root.tag else root.tag
+            tag_name = root.tag.split('}')[-1] if '}' in root.tag else root.tag
 
-            if tag == 'sitemapindex':
-                # Sitemap index — recurse into child sitemaps
-                for sitemap in root.findall('.//sitemap') or root.findall('.//{*}sitemap'):
-                    loc = sitemap.findtext('loc') or sitemap.findtext('{*}loc', '')
-                    if not loc:
-                        for child in sitemap:
-                            if 'loc' in child.tag.lower():
-                                loc = child.text
-                                break
-                    if loc:
-                        parse_sitemap(loc.strip(), depth + 1)
+            if tag_name == 'sitemapindex':
+                for child in root:
+                    child_tag = child.tag.split('}')[-1] if '}' in child.tag else child.tag
+                    if child_tag == 'sitemap':
+                        loc = _find_loc(child)
+                        if loc:
+                            parse_sitemap(loc, depth + 1)
 
-            elif tag == 'urlset':
-                # URL list
-                for url_el in root.findall('.//url') or root.findall('.//{*}url'):
-                    loc = url_el.findtext('loc') or url_el.findtext('{*}loc', '')
-                    if not loc:
-                        for child in url_el:
-                            if 'loc' in child.tag.lower():
-                                loc = child.text
-                                break
-                    if loc:
-                        all_urls.append(loc.strip())
+            elif tag_name == 'urlset':
+                for child in root:
+                    child_tag = child.tag.split('}')[-1] if '}' in child.tag else child.tag
+                    if child_tag == 'url':
+                        loc = _find_loc(child)
+                        if loc:
+                            all_urls.append(loc)
+
+            logger.info(f"Parsed sitemap {url}: {len(all_urls)} total URLs so far")
 
         except Exception as e:
-            logger.debug(f"Sitemap parse failed for {url}: {e}")
+            logger.debug(f"Sitemap fetch failed for {url}: {e}")
 
     for smap_url in sitemap_urls:
         parse_sitemap(smap_url)
 
-    # Step 4: Deduplicate and classify
+    # Step 4: Deduplicate, filter, classify
     seen_paths = set()
+    seen_categories = {}
     discovered = []
-    origin_host = urlparse(origin).hostname
 
     for url in all_urls:
         try:
             parsed = urlparse(url)
-            if parsed.hostname != origin_host:
+            host = parsed.hostname
+            if host not in allowed_hosts:
                 continue
         except Exception:
             continue
@@ -141,12 +167,22 @@ def discover_from_sitemap(origin: str) -> list:
             continue
         if _should_skip(url):
             continue
+        # Skip very deep paths (likely individual items, not section pages)
+        if path.count('/') > 3:
+            continue
 
         seen_paths.add(path)
         category = _classify_page(url, '')
+
+        # Limit 2 per category
+        seen_categories[category] = seen_categories.get(category, 0) + 1
+        if seen_categories[category] > 2:
+            continue
+
         discovered.append({'name': category, 'url': url})
 
-    logger.info(f"Sitemap discovery: found {len(all_urls)} URLs, {len(discovered)} unique pages")
+    logger.info(f"Sitemap discovery: {len(all_urls)} raw URLs → {len(discovered)} unique pages "
+               f"(allowed hosts: {allowed_hosts})")
     return discovered
 
 
