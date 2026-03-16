@@ -1,5 +1,5 @@
 from rest_framework import serializers
-from .models import Run, RunScreenshot, RunReport, RunOverallScore
+from .models import Run, RunScreenshot, RunReport, RunOverallScore, RunComparison
 
 
 class RunScreenshotSerializer(serializers.ModelSerializer):
@@ -35,10 +35,21 @@ class RunOverallScoreSerializer(serializers.ModelSerializer):
         read_only_fields = ['id', 'created_at']
 
 
+class RunComparisonSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = RunComparison
+        fields = [
+            'id', 'executive_summary', 'feature_matrix', 'flow_comparison',
+            'ux_scorecard', 'recommendations', 'competitive_position', 'created_at',
+        ]
+        read_only_fields = ['id', 'created_at']
+
+
 class RunSerializer(serializers.ModelSerializer):
     screenshots = RunScreenshotSerializer(many=True, read_only=True)
     reports = RunReportSerializer(many=True, read_only=True)
     overall_scores = RunOverallScoreSerializer(many=True, read_only=True)
+    comparison = RunComparisonSerializer(read_only=True)
 
     class Meta:
         model = Run
@@ -46,7 +57,7 @@ class RunSerializer(serializers.ModelSerializer):
             'id', 'job', 'triggered_by', 'status', 'progress', 'current_phase',
             'started_at', 'completed_at', 'duration_seconds', 'cost_api_usd',
             'error_log', 'retry_count',
-            'screenshots', 'reports', 'overall_scores', 'created_at',
+            'screenshots', 'reports', 'overall_scores', 'comparison', 'created_at',
         ]
         read_only_fields = ['id', 'created_at']
 

@@ -175,6 +175,15 @@ def execute_run(self, run_id: str):
         update_run_progress(run, "scoring", 92, "scoring", "Calculating scores...")
         calculate_overall_scores(run)
 
+        # ═══ PHASE 5: COMPARATIVE ANALYSIS ═══
+        update_run_progress(run, "comparing", 95, "comparing", "Generating comparative analysis...")
+
+        from apps.runs.services.comparator import generate_comparison
+        try:
+            generate_comparison(run)
+        except Exception as e:
+            logger.error(f"Comparison failed: {e}")
+
         # ═══ COMPLETE ═══
         run.completed_at = timezone.now()
         run.duration_seconds = int((run.completed_at - run.started_at).total_seconds())

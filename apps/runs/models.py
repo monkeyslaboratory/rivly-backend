@@ -10,6 +10,7 @@ class Run(models.Model):
         SCREENSHOTS = "screenshots"
         ANALYZING = "analyzing"
         SCORING = "scoring"
+        COMPARING = "comparing"
         COMPLETED = "completed"
         PARTIAL = "partial"
         FAILED = "failed"
@@ -88,3 +89,29 @@ class RunOverallScore(models.Model):
     class Meta:
         db_table = "run_overall_scores"
         unique_together = ("run", "competitor")
+
+
+class RunComparison(models.Model):
+    """Comparative analysis across all competitors for a run."""
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    run = models.OneToOneField(Run, on_delete=models.CASCADE, related_name="comparison")
+
+    executive_summary = models.TextField(default="")
+    feature_matrix = models.JSONField(default=list)
+    # [{"feature": "...", "our_product": "yes/no/partial", "competitors": {"name": "yes/no/partial"}}]
+
+    flow_comparison = models.JSONField(default=list)
+    # [{"flow": "Registration", "products": {"Our": {"steps": 3, "friction": "low"}, "Comp A": {...}}}]
+
+    ux_scorecard = models.JSONField(default=dict)
+    # {"dimensions": [...], "scores": {"Our Product": {...}, "Comp A": {...}}}
+
+    recommendations = models.JSONField(default=list)
+    # [{"finding": "...", "evidence": "...", "impact": "...", "priority": "...", "recommendation": "..."}]
+
+    competitive_position = models.TextField(default="")
+
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "run_comparisons"
