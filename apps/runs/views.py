@@ -127,3 +127,31 @@ class RunAddPagesView(APIView):
             browser.close()
 
         return Response({'added': new_shots})
+
+
+class RunAuthCrawlView(APIView):
+    """Submit credentials and re-crawl auth-required pages."""
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, pk):
+        team_ids = TeamMember.objects.filter(user=request.user).values_list('team_id', flat=True)
+        try:
+            run = Run.objects.get(pk=pk, job__team_id__in=team_ids, status='discovered')
+        except Run.DoesNotExist:
+            return Response({'detail': 'Run not found.'}, status=404)
+
+        credentials = request.data.get('credentials', {})
+        if not credentials.get('email') or not credentials.get('password'):
+            return Response({'detail': 'Email and password required.'}, status=400)
+
+        # Store credentials (would be encrypted/vault in production)
+        run.auth_credentials = credentials
+        run.save(update_fields=['auth_credentials'])
+
+        # Trigger authenticated crawl in background
+        from apps.runs.services.screenshot import authenticated_crawl
+        thread = threading.Thread(target=authenticated_crawl, args=(str(run.id),))
+        thread.daemon = True
+        thread.start()
+
+        return Response({'status': 'auth_crawl_started'})

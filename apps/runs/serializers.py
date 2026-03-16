@@ -50,6 +50,10 @@ class RunSerializer(serializers.ModelSerializer):
     reports = RunReportSerializer(many=True, read_only=True)
     overall_scores = RunOverallScoreSerializer(many=True, read_only=True)
     comparison = RunComparisonSerializer(read_only=True)
+    has_auth_pages = serializers.SerializerMethodField()
+
+    def get_has_auth_pages(self, obj):
+        return obj.screenshots.filter(status='auth_required').exists()
 
     class Meta:
         model = Run
@@ -57,7 +61,8 @@ class RunSerializer(serializers.ModelSerializer):
             'id', 'job', 'triggered_by', 'status', 'progress', 'current_phase',
             'started_at', 'completed_at', 'duration_seconds', 'cost_api_usd',
             'error_log', 'retry_count',
-            'screenshots', 'reports', 'overall_scores', 'comparison', 'created_at',
+            'screenshots', 'reports', 'overall_scores', 'comparison',
+            'has_auth_pages', 'created_at',
         ]
         read_only_fields = ['id', 'created_at']
 

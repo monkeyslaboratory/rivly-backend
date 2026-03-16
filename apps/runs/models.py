@@ -30,6 +30,9 @@ class Run(models.Model):
     cost_api_usd = models.DecimalField(max_digits=10, decimal_places=4, default=0)
     error_log = models.TextField(blank=True, default="")
     retry_count = models.IntegerField(default=0)
+    # Credentials for authenticated crawl (encrypted in production, plain for dev)
+    auth_credentials = models.JSONField(default=dict, blank=True)
+    # {"url": "https://...", "email": "...", "password": "...", "login_url": "..."}
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:

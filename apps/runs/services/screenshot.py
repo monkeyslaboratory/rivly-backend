@@ -437,6 +437,45 @@ def _capture_page(pw_page, page_url: str, page_name: str, device_type: str,
             except Exception:
                 pass
 
+            # Detect auth wall / login form
+            try:
+                has_auth_wall = pw_page.evaluate('''() => {
+                    const body = document.body;
+                    if (!body) return false;
+                    const text = body.innerText.toLowerCase();
+                    const html = body.innerHTML.toLowerCase();
+
+                    // Check for login form indicators
+                    const hasPasswordField = document.querySelector('input[type="password"]') !== null;
+                    const hasLoginForm = document.querySelector('form[action*="login"], form[action*="signin"], form[action*="auth"]') !== null;
+
+                    // Check for login-related text patterns
+                    const loginPatterns = [
+                        'sign in', 'log in', 'login', 'войти', 'авторизац',
+                        'enter your password', 'enter your email',
+                        'create an account', 'don\\'t have an account',
+                        'forgot password', 'забыли пароль',
+                        'access denied', 'unauthorized', '401',
+                        'please log in', 'authentication required',
+                    ];
+                    const hasLoginText = loginPatterns.some(p => text.includes(p));
+
+                    // Strong signal: password field + login text
+                    if (hasPasswordField && hasLoginText) return true;
+                    // Medium signal: login form
+                    if (hasLoginForm) return true;
+                    // Weak signal: page is mostly a login prompt (short content + login text)
+                    if (hasLoginText && text.length < 500) return true;
+
+                    return false;
+                }''')
+
+                if has_auth_wall:
+                    status = 'auth_required'
+
+            except Exception:
+                pass
+
     except PlaywrightTimeout:
         status = 'timeout'
         error_message = f'Timeout loading {page_url}'
@@ -581,3 +620,93 @@ def screenshot_competitor(run, competitor, device_types=None, pages=None):
     logger.info(f"[{competitor.name}] Total: {len(screenshots)} screenshots "
                f"({sum(1 for s in screenshots if s.status == 'success')} success)")
     return screenshots
+
+
+def authenticated_crawl(run_id: str):
+    """Re-crawl auth-required pages after logging in with provided credentials."""
+    from apps.runs.models import Run
+
+    run = Run.objects.get(id=run_id)
+    creds = run.auth_credentials
+    if not creds:
+        return
+
+    email = creds.get('email', '')
+    password = creds.get('password', '')
+    login_url = creds.get('login_url', '')
+
+    # Find auth_required screenshots
+    auth_shots = RunScreenshot.objects.filter(run=run, status='auth_required')
+    if not auth_shots.exists():
+        return
+
+    competitor = auth_shots.first().competitor
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        context = browser.new_context(viewport=VIEWPORTS['desktop'])
+        page = context.new_page()
+
+        # Step 1: Navigate to login page and authenticate
+        target_login = login_url or f"{competitor.url.rstrip('/')}/login"
+        try:
+            page.goto(target_login, wait_until='networkidle', timeout=20000)
+            page.wait_for_timeout(2000)
+
+            # Find and fill email/username field
+            email_selectors = [
+                'input[type="email"]', 'input[name="email"]', 'input[name="login"]',
+                'input[name="username"]', 'input[id*="email"]', 'input[id*="login"]',
+                'input[placeholder*="email" i]', 'input[placeholder*="логин" i]',
+            ]
+            for sel in email_selectors:
+                el = page.query_selector(sel)
+                if el:
+                    el.fill(email)
+                    break
+
+            # Find and fill password field
+            pw_el = page.query_selector('input[type="password"]')
+            if pw_el:
+                pw_el.fill(password)
+
+            # Find and click submit button
+            submit_selectors = [
+                'button[type="submit"]', 'input[type="submit"]',
+                'button:has-text("Log in")', 'button:has-text("Sign in")',
+                'button:has-text("Войти")', 'button:has-text("Login")',
+            ]
+            for sel in submit_selectors:
+                btn = page.query_selector(sel)
+                if btn:
+                    btn.click()
+                    break
+
+            # Wait for navigation after login
+            page.wait_for_timeout(5000)
+
+            logger.info(f"Authenticated crawl: logged in at {target_login}")
+
+        except Exception as e:
+            logger.error(f"Login failed: {e}")
+            browser.close()
+            return
+
+        # Step 2: Re-capture each auth_required page
+        for shot in auth_shots:
+            new_shot = _capture_page(
+                page, shot.page_url, f"{shot.page_name}_authenticated",
+                'desktop', run, competitor, VIEWPORTS['desktop']
+            )
+            # Mark the new shot as authenticated
+            if new_shot.status == 'auth_required':
+                # Still showing login — creds may have failed
+                new_shot.status = 'auth_failed'
+                new_shot.save(update_fields=['status'])
+
+            logger.info(f"Auth crawl: {shot.page_url} -> {new_shot.status}")
+
+        context.close()
+        browser.close()
+
+    logger.info(f"Authenticated crawl complete for run {run_id}")
