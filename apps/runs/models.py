@@ -8,6 +8,8 @@ class Run(models.Model):
         QUEUED = "queued"
         PREFLIGHT = "preflight"
         SCREENSHOTS = "screenshots"
+        DISCOVERED = "discovered"
+        APPROVED = "approved"
         ANALYZING = "analyzing"
         SCORING = "scoring"
         COMPARING = "comparing"

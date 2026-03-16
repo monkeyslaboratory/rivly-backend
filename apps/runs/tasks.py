@@ -1,6 +1,6 @@
 """
 Celery task: execute a full analysis run.
-Pipeline: preflight → screenshots → AI analysis → scoring → notify.
+Pipeline: discovery (auto) → approval (user) → analysis (auto).
 Sends real-time progress via Django Channels WebSocket.
 """
 import logging
@@ -45,15 +45,15 @@ def update_run_progress(run, status: str, progress: int, phase: str, message: st
 
 
 @shared_task(bind=True, max_retries=2, default_retry_delay=60)
-def execute_run(self, run_id: str):
+def execute_discovery(self, run_id: str):
     """
-    Main Celery task. Runs the full analysis pipeline.
+    Discovery phase: preflight → screenshots of all discovered pages.
+    Sets status to "discovered" and waits for user approval.
+    Progress: 0→50%
     """
     from apps.runs.models import Run
     from apps.runs.services.preflight import preflight_check
     from apps.runs.services.screenshot import screenshot_competitor
-    from apps.runs.services.analyzer import analyze_competitor_page
-    from apps.runs.services.scorer import calculate_overall_scores
 
     run = Run.objects.select_related("job").prefetch_related("job__competitors").get(id=run_id)
     competitors = list(run.job.competitors.all())
@@ -87,13 +87,12 @@ def execute_run(self, run_id: str):
             })
             return
 
-        total_steps = len(accessible) * 2  # screenshot + analysis
+        total_steps = len(accessible)
         completed_steps = 0
 
         # ═══ PHASE 2: SCREENSHOTS ═══
         update_run_progress(run, "screenshots", 5, "screenshots", "Starting screenshots...")
 
-        all_screenshots = {}
         for competitor in accessible:
             send_ws_event(str(run.id), "run.competitor_started", {
                 "competitor_id": str(competitor.id),
@@ -103,7 +102,6 @@ def execute_run(self, run_id: str):
             })
 
             screenshots = screenshot_competitor(run, competitor)
-            all_screenshots[competitor.id] = screenshots
             completed_steps += 1
 
             for shot in screenshots:
@@ -116,12 +114,76 @@ def execute_run(self, run_id: str):
                     })
 
             success_count = sum(1 for s in screenshots if s.status == 'success')
-            progress = int(5 + (completed_steps / total_steps) * 40)
+            progress = int(5 + (completed_steps / total_steps) * 45)
             update_run_progress(run, "screenshots", progress, "screenshots",
                                 f"Captured {success_count} pages from {competitor.name}")
 
+        # ═══ DISCOVERY COMPLETE — WAIT FOR APPROVAL ═══
+        update_run_progress(run, "discovered", 50, "discovered",
+                            "Pages discovered. Waiting for approval...")
+
+        send_ws_event(str(run.id), "run.discovered", {
+            "status": "discovered",
+            "message": "Screenshots captured. Review and approve to start analysis.",
+            "total_screenshots": run.screenshots.filter(status="success").count(),
+        })
+
+    except Exception as e:
+        logger.exception(f"Run {run_id} discovery failed: {e}")
+        run.error_log = str(e)[:2000]
+        run.completed_at = timezone.now()
+        if run.started_at:
+            run.duration_seconds = int((run.completed_at - run.started_at).total_seconds())
+        run.save(update_fields=["error_log", "completed_at", "duration_seconds"])
+
+        update_run_progress(run, "failed", 0, "failed", str(e)[:200])
+        send_ws_event(str(run.id), "run.failed", {
+            "error_message": str(e)[:300],
+        })
+
+        raise self.retry(exc=e)
+
+
+@shared_task(bind=True, max_retries=2, default_retry_delay=60)
+def execute_analysis(self, run_id: str):
+    """
+    Analysis phase: AI analysis → scoring → comparative analysis.
+    Runs only after user approves discovered pages.
+    Progress: 50→100%
+    """
+    from apps.runs.models import Run
+    from apps.runs.services.analyzer import analyze_competitor_page
+    from apps.runs.services.scorer import calculate_overall_scores
+
+    run = Run.objects.select_related("job").prefetch_related("job__competitors").get(id=run_id)
+    competitors = list(run.job.competitors.all())
+
+    try:
+        run.status = "approved"
+        run.save(update_fields=["status"])
+
         # ═══ PHASE 3: AI ANALYSIS ═══
         update_run_progress(run, "analyzing", 50, "analyzing", "Starting AI analysis...")
+
+        # Get screenshots grouped by competitor
+        all_screenshots = {}
+        for competitor in competitors:
+            shots = list(run.screenshots.filter(competitor=competitor, status="success"))
+            if shots:
+                all_screenshots[competitor.id] = shots
+
+        accessible = [c for c in competitors if c.id in all_screenshots]
+        failed_preflight = [c for c in competitors if c.id not in all_screenshots]
+
+        if not accessible:
+            update_run_progress(run, "failed", 50, "analyzing", "No screenshots to analyze")
+            send_ws_event(str(run.id), "run.failed", {
+                "error_message": "No successful screenshots to analyze.",
+            })
+            return
+
+        total_steps = len(accessible)
+        completed_steps = 0
 
         for competitor in accessible:
             send_ws_event(str(run.id), "run.competitor_started", {
@@ -131,19 +193,7 @@ def execute_run(self, run_id: str):
                 "phase": "analyzing",
             })
 
-            comp_screenshots = all_screenshots.get(competitor.id, [])
-            successful_shots = [s for s in comp_screenshots if s.status == "success"]
-
-            if not successful_shots:
-                send_ws_event(str(run.id), "run.competitor_error", {
-                    "competitor_id": str(competitor.id),
-                    "competitor_name": competitor.name,
-                    "error_type": "no_screenshots",
-                    "error_message": "No successful screenshots to analyze",
-                    "recoverable": False,
-                })
-                completed_steps += 1
-                continue
+            successful_shots = all_screenshots.get(competitor.id, [])
 
             # Analyze EACH page separately (not by area — by page)
             for shot in successful_shots:
@@ -189,7 +239,7 @@ def execute_run(self, run_id: str):
         run.completed_at = timezone.now()
         run.duration_seconds = int((run.completed_at - run.started_at).total_seconds())
 
-        final_status = "completed" if not failed else "partial"
+        final_status = "completed" if not failed_preflight else "partial"
         update_run_progress(run, final_status, 100, "completed", "Analysis complete!")
 
         send_ws_event(str(run.id), "run.completed", {
@@ -197,12 +247,12 @@ def execute_run(self, run_id: str):
             "duration_seconds": run.duration_seconds,
             "total_competitors": len(competitors),
             "successful_competitors": len(accessible),
-            "failed_competitors": len(failed),
+            "failed_competitors": len(failed_preflight),
             "report_url": f"/api/v1/runs/{run.id}/report/",
         })
 
     except Exception as e:
-        logger.exception(f"Run {run_id} failed: {e}")
+        logger.exception(f"Run {run_id} analysis failed: {e}")
         run.error_log = str(e)[:2000]
         run.completed_at = timezone.now()
         if run.started_at:
@@ -215,3 +265,21 @@ def execute_run(self, run_id: str):
         })
 
         raise self.retry(exc=e)
+
+
+@shared_task(bind=True, max_retries=2, default_retry_delay=60)
+def execute_run(self, run_id: str):
+    """
+    Legacy wrapper: runs full pipeline (discovery + analysis) without approval step.
+    Kept for backward compatibility.
+    """
+    from apps.runs.models import Run
+
+    # Run discovery
+    execute_discovery(run_id)
+
+    # Check if discovery succeeded
+    run = Run.objects.get(id=run_id)
+    if run.status == "discovered":
+        # Auto-approve and run analysis
+        execute_analysis(run_id)
