@@ -356,20 +356,76 @@ def _capture_page(pw_page, page_url: str, page_name: str, device_type: str,
     html_snippet = ''
 
     try:
-        response = pw_page.goto(page_url, wait_until='domcontentloaded', timeout=20000)
+        # Use networkidle to wait for all requests to finish
+        response = pw_page.goto(page_url, wait_until='networkidle', timeout=30000)
 
         if response and response.status >= 400:
             status = 'error' if response.status != 404 else 'not_found'
             error_message = f'HTTP {response.status}'
         else:
-            # Wait for content to render
+            # Wait for JS rendering — SPA frameworks need time
             pw_page.wait_for_timeout(2000)
 
-            # Scroll down to trigger lazy loading
-            pw_page.evaluate('window.scrollTo(0, document.body.scrollHeight / 2)')
-            pw_page.wait_for_timeout(500)
-            pw_page.evaluate('window.scrollTo(0, 0)')
-            pw_page.wait_for_timeout(500)
+            # Wait for loaders/skeletons to disappear
+            try:
+                pw_page.evaluate('''() => {
+                    return new Promise((resolve) => {
+                        const check = () => {
+                            const loaders = document.querySelectorAll(
+                                '[class*="skeleton"], [class*="shimmer"], [class*="loader"], ' +
+                                '[class*="loading"], [class*="spinner"], [class*="placeholder"], ' +
+                                '[class*="Skeleton"], [class*="Shimmer"], [class*="Loader"], ' +
+                                '[class*="Loading"], [class*="Spinner"], [class*="Placeholder"], ' +
+                                '[role="progressbar"], .animate-pulse'
+                            );
+                            // Filter only visible ones
+                            const visible = Array.from(loaders).filter(el => {
+                                const rect = el.getBoundingClientRect();
+                                return rect.width > 0 && rect.height > 0 &&
+                                       window.getComputedStyle(el).display !== 'none';
+                            });
+                            if (visible.length === 0) {
+                                resolve(true);
+                            } else {
+                                setTimeout(check, 500);
+                            }
+                        };
+                        // Max wait 8 seconds for loaders to disappear
+                        setTimeout(() => resolve(false), 8000);
+                        check();
+                    });
+                }''')
+            except Exception:
+                pass
+
+            # Additional wait after loaders gone
+            pw_page.wait_for_timeout(1000)
+
+            # Scroll down slowly to trigger lazy loading
+            pw_page.evaluate('''() => {
+                return new Promise((resolve) => {
+                    const height = document.body.scrollHeight;
+                    const step = Math.floor(height / 4);
+                    let current = 0;
+                    const scroll = () => {
+                        current += step;
+                        window.scrollTo(0, Math.min(current, height));
+                        if (current < height) {
+                            setTimeout(scroll, 400);
+                        } else {
+                            // Scroll back to top
+                            setTimeout(() => {
+                                window.scrollTo(0, 0);
+                                setTimeout(resolve, 800);
+                            }, 500);
+                        }
+                    };
+                    scroll();
+                });
+            }''')
+
+            # Final wait for any lazy images triggered by scroll
+            pw_page.wait_for_timeout(1000)
 
             # Screenshot
             pw_page.screenshot(path=str(local_path), full_page=True)
