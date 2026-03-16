@@ -1,12 +1,16 @@
 """
 Deep site crawler + screenshot service.
 Automatically discovers and captures ALL important pages of a competitor site.
+Discovery priority: sitemap.xml → robots.txt → DOM links → common path probing.
 """
 import os
+import re
 import uuid
 import logging
+import xml.etree.ElementTree as ET
 from pathlib import Path
 from urllib.parse import urljoin, urlparse
+import requests
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeout
 
 os.environ["DJANGO_ALLOW_ASYNC_UNSAFE"] = "true"
@@ -32,6 +36,118 @@ SKIP_PATTERNS = [
     'twitter.com', 'instagram.com', 'linkedin.com', 'youtube.com',
     'google.com', 'apple.com/app', 'play.google.com',
 ]
+
+
+def discover_from_sitemap(origin: str) -> list:
+    """
+    Parse sitemap.xml (and sitemaps referenced in robots.txt) to find all pages.
+    Returns list of {'name': ..., 'url': ...}.
+    """
+    sitemap_urls = []
+
+    # Step 1: Check robots.txt for sitemap references
+    try:
+        resp = requests.get(f"{origin}/robots.txt", timeout=10,
+                           headers={'User-Agent': 'Mozilla/5.0'})
+        if resp.status_code == 200:
+            for line in resp.text.splitlines():
+                line = line.strip()
+                if line.lower().startswith('sitemap:'):
+                    sitemap_url = line.split(':', 1)[1].strip()
+                    if sitemap_url.startswith('//'):
+                        sitemap_url = 'https:' + sitemap_url
+                    sitemap_urls.append(sitemap_url)
+    except Exception as e:
+        logger.debug(f"robots.txt fetch failed: {e}")
+
+    # Step 2: Try standard sitemap locations
+    if not sitemap_urls:
+        sitemap_urls = [
+            f"{origin}/sitemap.xml",
+            f"{origin}/sitemap_index.xml",
+            f"{origin}/sitemap/sitemap.xml",
+        ]
+
+    # Step 3: Parse sitemaps
+    all_urls = []
+    parsed_sitemaps = set()
+
+    def parse_sitemap(url: str, depth: int = 0):
+        if depth > 2 or url in parsed_sitemaps:
+            return
+        parsed_sitemaps.add(url)
+
+        try:
+            resp = requests.get(url, timeout=10,
+                               headers={'User-Agent': 'Mozilla/5.0'})
+            if resp.status_code != 200:
+                return
+
+            # Remove XML namespace for easier parsing
+            content = re.sub(r'\sxmlns="[^"]+"', '', resp.text, count=1)
+
+            try:
+                root = ET.fromstring(content)
+            except ET.ParseError:
+                return
+
+            tag = root.tag.split('}')[-1] if '}' in root.tag else root.tag
+
+            if tag == 'sitemapindex':
+                # Sitemap index — recurse into child sitemaps
+                for sitemap in root.findall('.//sitemap') or root.findall('.//{*}sitemap'):
+                    loc = sitemap.findtext('loc') or sitemap.findtext('{*}loc', '')
+                    if not loc:
+                        for child in sitemap:
+                            if 'loc' in child.tag.lower():
+                                loc = child.text
+                                break
+                    if loc:
+                        parse_sitemap(loc.strip(), depth + 1)
+
+            elif tag == 'urlset':
+                # URL list
+                for url_el in root.findall('.//url') or root.findall('.//{*}url'):
+                    loc = url_el.findtext('loc') or url_el.findtext('{*}loc', '')
+                    if not loc:
+                        for child in url_el:
+                            if 'loc' in child.tag.lower():
+                                loc = child.text
+                                break
+                    if loc:
+                        all_urls.append(loc.strip())
+
+        except Exception as e:
+            logger.debug(f"Sitemap parse failed for {url}: {e}")
+
+    for smap_url in sitemap_urls:
+        parse_sitemap(smap_url)
+
+    # Step 4: Deduplicate and classify
+    seen_paths = set()
+    discovered = []
+    origin_host = urlparse(origin).hostname
+
+    for url in all_urls:
+        try:
+            parsed = urlparse(url)
+            if parsed.hostname != origin_host:
+                continue
+        except Exception:
+            continue
+
+        path = parsed.path.rstrip('/')
+        if not path or path == '/' or path in seen_paths:
+            continue
+        if _should_skip(url):
+            continue
+
+        seen_paths.add(path)
+        category = _classify_page(url, '')
+        discovered.append({'name': category, 'url': url})
+
+    logger.info(f"Sitemap discovery: found {len(all_urls)} URLs, {len(discovered)} unique pages")
+    return discovered
 
 
 def _is_same_domain(url: str, origin: str) -> bool:
@@ -290,16 +406,31 @@ def screenshot_competitor(run, competitor, device_types=None, pages=None):
             )
             pw_page = context.new_page()
 
-            # Step 1: Load homepage
+            # Step 1: Sitemap discovery (fastest, most reliable)
             pages_to_capture = [{'name': 'homepage', 'url': base_url}]
+            sitemap_pages = discover_from_sitemap(origin)
+            if sitemap_pages:
+                # Prioritize: take up to MAX_PAGES from sitemap
+                seen_names = {'homepage'}
+                for sp in sitemap_pages:
+                    if sp['name'] not in seen_names and len(pages_to_capture) < MAX_PAGES:
+                        pages_to_capture.append(sp)
+                        seen_names.add(sp['name'])
+                logger.info(f"[{competitor.name}] Sitemap: added {len(pages_to_capture) - 1} pages")
 
+            # Step 2: Load homepage + DOM discovery (for pages not in sitemap)
             try:
                 pw_page.goto(base_url, wait_until='domcontentloaded', timeout=25000)
                 pw_page.wait_for_timeout(3000)
 
-                # Step 2: Discover all pages from DOM
-                discovered = discover_all_pages(pw_page, base_url, origin)
-                pages_to_capture.extend(discovered)
+                if len(pages_to_capture) < 5:
+                    # Sitemap was small or empty — supplement with DOM links
+                    discovered = discover_all_pages(pw_page, base_url, origin)
+                    existing_urls = {p['url'] for p in pages_to_capture}
+                    for dp in discovered:
+                        if dp['url'] not in existing_urls and len(pages_to_capture) < MAX_PAGES:
+                            pages_to_capture.append(dp)
+                            existing_urls.add(dp['url'])
 
             except Exception as e:
                 logger.warning(f"Homepage load failed for {competitor.name}: {e}")
