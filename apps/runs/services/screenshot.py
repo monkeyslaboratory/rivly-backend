@@ -1,6 +1,6 @@
 """
-Smart screenshot service with automatic page discovery.
-Crawls competitor sites, discovers key pages, captures everything.
+Deep site crawler + screenshot service.
+Automatically discovers and captures ALL important pages of a competitor site.
 """
 import os
 import uuid
@@ -23,86 +23,239 @@ VIEWPORTS = {
     'mobile': {'width': 390, 'height': 844},
 }
 
-# Keywords to identify important pages from nav links
-PAGE_PATTERNS = {
-    'pricing': ['pricing', 'plans', 'price', 'tariff', 'subscription'],
-    'features': ['features', 'product', 'solutions', 'capabilities', 'platform'],
-    'about': ['about', 'company', 'team', 'story'],
-    'contact': ['contact', 'support', 'help', 'demo', 'get-started', 'book'],
-    'blog': ['blog', 'news', 'articles', 'resources', 'insights'],
-    'login': ['login', 'signin', 'sign-in', 'account', 'dashboard', 'app'],
-    'signup': ['signup', 'sign-up', 'register', 'get-started', 'start', 'trial', 'free'],
-    'careers': ['careers', 'jobs', 'hiring'],
-    'docs': ['docs', 'documentation', 'api', 'developers', 'guides'],
-    'integrations': ['integrations', 'apps', 'marketplace', 'plugins'],
-    'customers': ['customers', 'case-studies', 'testimonials', 'reviews'],
-    'security': ['security', 'privacy', 'compliance', 'trust'],
-    'changelog': ['changelog', 'releases', 'updates', 'whats-new'],
-}
+MAX_PAGES = 15
 
-MAX_PAGES = 8  # Max pages to screenshot per competitor
+# Skip patterns — URLs that are not useful to screenshot
+SKIP_PATTERNS = [
+    '#', 'javascript:', 'mailto:', 'tel:', '.pdf', '.zip', '.exe',
+    '/cdn-cgi/', '/wp-json/', '/feed/', '/rss/', 'facebook.com',
+    'twitter.com', 'instagram.com', 'linkedin.com', 'youtube.com',
+    'google.com', 'apple.com/app', 'play.google.com',
+]
 
 
-def discover_pages(page, base_url: str) -> list:
-    """Extract nav links and discover important pages automatically."""
+def _is_same_domain(url: str, origin: str) -> bool:
+    """Check if URL belongs to the same domain."""
     try:
-        links = page.evaluate('''(baseUrl) => {
+        parsed = urlparse(url)
+        origin_parsed = urlparse(origin)
+        return parsed.hostname == origin_parsed.hostname
+    except Exception:
+        return False
+
+
+def _should_skip(url: str) -> bool:
+    """Check if URL should be skipped."""
+    lower = url.lower()
+    return any(skip in lower for skip in SKIP_PATTERNS)
+
+
+def _classify_page(url: str, text: str) -> str:
+    """Classify a page by its URL path and link text."""
+    path = urlparse(url).path.lower().strip('/')
+    text_lower = text.lower()
+    combined = f"{path} {text_lower}"
+
+    classifications = {
+        'pricing': ['pricing', 'plans', 'tariff', 'price', 'subscription', 'cost'],
+        'features': ['features', 'product', 'solutions', 'capabilities', 'platform', 'tools'],
+        'about': ['about', 'company', 'team', 'story', 'mission', 'who-we-are'],
+        'contact': ['contact', 'support', 'help', 'demo', 'book-a-demo', 'get-in-touch'],
+        'signup': ['signup', 'sign-up', 'register', 'get-started', 'start-free', 'trial', 'free-trial'],
+        'login': ['login', 'signin', 'sign-in', 'account', 'dashboard', 'app'],
+        'blog': ['blog', 'news', 'articles', 'resources', 'insights', 'learn'],
+        'docs': ['docs', 'documentation', 'api', 'developers', 'guides', 'knowledge'],
+        'integrations': ['integrations', 'apps', 'marketplace', 'plugins', 'connect'],
+        'customers': ['customers', 'case-studies', 'testimonials', 'reviews', 'success-stories'],
+        'security': ['security', 'privacy', 'compliance', 'trust', 'gdpr'],
+        'careers': ['careers', 'jobs', 'hiring', 'join-us', 'work-with-us'],
+        'changelog': ['changelog', 'releases', 'updates', 'whats-new', 'release-notes'],
+        'partners': ['partners', 'affiliate', 'referral', 'reseller'],
+        'promotions': ['promo', 'offer', 'discount', 'deal', 'sale', 'bonus', 'reward', 'loyalty'],
+        'catalog': ['catalog', 'catalogue', 'products', 'shop', 'store', 'collection', 'category'],
+        'faq': ['faq', 'frequently-asked', 'help-center', 'knowledge-base'],
+    }
+
+    for category, keywords in classifications.items():
+        if any(kw in combined for kw in keywords):
+            return category
+
+    # Fallback — use first path segment
+    segments = path.split('/')
+    if segments and segments[0]:
+        return segments[0][:30]
+
+    return 'page'
+
+
+def discover_all_pages(page, base_url: str, origin: str) -> list:
+    """
+    Deep page discovery — finds ALL navigable links on the page.
+    Collects from nav, header, footer, main content, buttons, CTAs.
+    """
+    try:
+        links = page.evaluate('''(args) => {
+            const [baseUrl, origin] = args;
             const results = [];
             const seen = new Set();
 
-            // Get links from nav, header, footer
-            const selectors = ['nav a', 'header a', '[role="navigation"] a', 'footer a'];
-            for (const sel of selectors) {
-                document.querySelectorAll(sel).forEach(a => {
-                    const href = a.href;
-                    const text = (a.textContent || '').trim().toLowerCase();
-                    if (href && !seen.has(href) && href.startsWith(baseUrl) && text.length < 50) {
-                        seen.add(href);
-                        results.push({ url: href, text: text });
-                    }
-                });
-            }
+            // Collect ALL links on the page
+            document.querySelectorAll('a[href]').forEach(a => {
+                let href = a.href;
+                if (!href) return;
 
-            // Also get prominent CTA links
-            document.querySelectorAll('a[class*="cta"], a[class*="btn"], a[class*="button"], .hero a, main a').forEach(a => {
-                const href = a.href;
-                const text = (a.textContent || '').trim().toLowerCase();
-                if (href && !seen.has(href) && href.startsWith(baseUrl) && text.length < 50) {
-                    seen.add(href);
-                    results.push({ url: href, text: text, isCta: true });
+                // Normalize
+                try {
+                    const url = new URL(href, baseUrl);
+                    href = url.href;
+                } catch(e) { return; }
+
+                const text = (a.textContent || '').trim().replace(/\\s+/g, ' ').substring(0, 80);
+                if (!text || text.length < 2) return;
+                if (seen.has(href)) return;
+                seen.add(href);
+
+                // Check same origin
+                try {
+                    const parsed = new URL(href);
+                    const originParsed = new URL(origin);
+                    if (parsed.hostname !== originParsed.hostname) return;
+                } catch(e) { return; }
+
+                // Get context — is it in nav, header, footer, main?
+                let context = 'body';
+                let el = a;
+                while (el.parentElement) {
+                    el = el.parentElement;
+                    const tag = el.tagName.toLowerCase();
+                    if (tag === 'nav' || el.getAttribute('role') === 'navigation') { context = 'nav'; break; }
+                    if (tag === 'header') { context = 'header'; break; }
+                    if (tag === 'footer') { context = 'footer'; break; }
+                    if (tag === 'main') { context = 'main'; break; }
                 }
+
+                // Priority: nav > header > main > footer > body
+                const priority = context === 'nav' ? 1 : context === 'header' ? 2 : context === 'main' ? 3 : context === 'footer' ? 4 : 5;
+
+                results.push({
+                    url: href,
+                    text: text,
+                    context: context,
+                    priority: priority,
+                    isButton: a.closest('button') !== null || a.className.toLowerCase().includes('btn') || a.className.toLowerCase().includes('cta'),
+                });
             });
 
+            // Sort by priority (nav first)
+            results.sort((a, b) => a.priority - b.priority);
             return results;
-        }''', base_url)
+        }''', [base_url, origin])
     except Exception as e:
         logger.warning(f"Link discovery failed: {e}")
         return []
 
-    # Classify discovered links
-    discovered = []
+    # Deduplicate by path and classify
+    seen_paths = set()
     seen_categories = set()
+    discovered = []
 
     for link in links:
         url = link['url']
         text = link.get('text', '')
-        path = urlparse(url).path.lower().strip('/')
 
-        # Match against patterns
-        for category, keywords in PAGE_PATTERNS.items():
-            if category in seen_categories:
-                continue
-            if any(kw in path or kw in text for kw in keywords):
-                discovered.append({'name': category, 'url': url})
-                seen_categories.add(category)
-                break
+        if _should_skip(url):
+            continue
 
-    return discovered[:MAX_PAGES - 1]  # Leave room for homepage
+        # Normalize path for dedup
+        path = urlparse(url).path.rstrip('/')
+        if path in seen_paths or path == '' or path == '/':
+            continue
+        seen_paths.add(path)
+
+        category = _classify_page(url, text)
+
+        # Allow multiple pages of same category (e.g., multiple product pages)
+        # but limit to 2 per category
+        cat_count = sum(1 for d in discovered if d['name'] == category)
+        if cat_count >= 2:
+            category = f"{category}_{cat_count + 1}"
+
+        discovered.append({
+            'name': category,
+            'url': url,
+            'text': text,
+            'context': link.get('context', 'body'),
+        })
+
+    logger.info(f"Discovered {len(discovered)} unique pages: {[d['name'] for d in discovered[:MAX_PAGES]]}")
+    return discovered[:MAX_PAGES - 1]
+
+
+def _capture_page(pw_page, page_url: str, page_name: str, device_type: str,
+                   run, competitor, viewport: dict) -> RunScreenshot:
+    """Capture a single page — screenshot + DOM text extraction."""
+    file_id = str(uuid.uuid4())
+    s3_key = f"runs/{run.id}/{competitor.id}/{device_type}_{page_name}_{file_id}.png"
+    local_path = SCREENSHOTS_DIR / f"{file_id}.png"
+
+    status = 'success'
+    error_message = ''
+    dom_text = ''
+    html_snippet = ''
+
+    try:
+        response = pw_page.goto(page_url, wait_until='domcontentloaded', timeout=20000)
+
+        if response and response.status >= 400:
+            status = 'error' if response.status != 404 else 'not_found'
+            error_message = f'HTTP {response.status}'
+        else:
+            # Wait for content to render
+            pw_page.wait_for_timeout(2000)
+
+            # Scroll down to trigger lazy loading
+            pw_page.evaluate('window.scrollTo(0, document.body.scrollHeight / 2)')
+            pw_page.wait_for_timeout(500)
+            pw_page.evaluate('window.scrollTo(0, 0)')
+            pw_page.wait_for_timeout(500)
+
+            # Screenshot
+            pw_page.screenshot(path=str(local_path), full_page=True)
+
+            # Extract text
+            try:
+                dom_text = pw_page.evaluate('() => document.body.innerText') or ''
+                dom_text = dom_text[:50000]
+            except Exception:
+                pass
+
+    except PlaywrightTimeout:
+        status = 'timeout'
+        error_message = f'Timeout loading {page_url}'
+    except Exception as e:
+        status = 'error'
+        error_message = str(e)[:500]
+        logger.warning(f"Capture failed {page_url}: {e}")
+
+    return RunScreenshot.objects.create(
+        run=run,
+        competitor=competitor,
+        page_url=page_url,
+        page_name=page_name,
+        device_type=device_type,
+        s3_key=s3_key,
+        viewport_width=viewport['width'],
+        viewport_height=viewport['height'],
+        dom_text=dom_text,
+        html_snippet='',  # Skip HTML to save space
+        status=status,
+        error_message=error_message,
+    )
 
 
 def screenshot_competitor(run, competitor, device_types=None, pages=None):
     """
-    Smart screenshot: auto-discovers key pages, captures homepage + discovered pages.
+    Deep crawl: auto-discovers ALL important pages, screenshots each one.
     """
     job = run.job
     if device_types is None:
@@ -113,7 +266,9 @@ def screenshot_competitor(run, competitor, device_types=None, pages=None):
 
     screenshots = []
     base_url = competitor.url.rstrip('/')
-    parsed = urlparse(base_url if base_url.startswith('http') else f'https://{base_url}')
+    if not base_url.startswith('http'):
+        base_url = f'https://{base_url}'
+    parsed = urlparse(base_url)
     origin = f"{parsed.scheme}://{parsed.hostname}"
 
     with sync_playwright() as p:
@@ -135,78 +290,37 @@ def screenshot_competitor(run, competitor, device_types=None, pages=None):
             )
             pw_page = context.new_page()
 
-            # --- Step 1: Homepage ---
+            # Step 1: Load homepage
             pages_to_capture = [{'name': 'homepage', 'url': base_url}]
 
             try:
-                pw_page.goto(base_url, wait_until='networkidle', timeout=30000)
-                pw_page.wait_for_timeout(2000)
+                pw_page.goto(base_url, wait_until='domcontentloaded', timeout=25000)
+                pw_page.wait_for_timeout(3000)
 
-                # Auto-discover pages from homepage navigation
-                discovered = discover_pages(pw_page, origin)
+                # Step 2: Discover all pages
+                discovered = discover_all_pages(pw_page, base_url, origin)
                 pages_to_capture.extend(discovered)
-                logger.info(f"Discovered {len(discovered)} pages for {competitor.name}: {[p['name'] for p in discovered]}")
+
+                logger.info(f"[{competitor.name}] Will capture {len(pages_to_capture)} pages: "
+                           f"{[p['name'] for p in pages_to_capture]}")
+
             except Exception as e:
-                logger.warning(f"Homepage load/discovery failed for {competitor.name}: {e}")
+                logger.warning(f"Homepage load failed for {competitor.name}: {e}")
 
-            # --- Step 2: Capture all pages ---
-            for page_info in pages_to_capture:
-                page_url = page_info['url']
-                page_name = page_info['name']
-                file_id = str(uuid.uuid4())
-                s3_key = f"runs/{run.id}/{competitor.id}/{device_type}_{page_name}_{file_id}.png"
-                local_path = SCREENSHOTS_DIR / f"{file_id}.png"
+            # Step 3: Capture ALL pages
+            for i, page_info in enumerate(pages_to_capture):
+                logger.info(f"[{competitor.name}] Capturing {i+1}/{len(pages_to_capture)}: "
+                           f"{page_info['name']} ({page_info['url'][:60]})")
 
-                status = 'success'
-                error_message = ''
-                dom_text = ''
-                html_snippet = ''
-
-                try:
-                    if page_url != base_url:  # Don't re-navigate for homepage
-                        pw_page.goto(page_url, wait_until='networkidle', timeout=20000)
-                        pw_page.wait_for_timeout(1500)
-
-                    pw_page.screenshot(path=str(local_path), full_page=True)
-
-                    try:
-                        dom_text = pw_page.evaluate('() => document.body.innerText') or ''
-                        if len(dom_text) > 50000:
-                            dom_text = dom_text[:50000]
-                    except Exception:
-                        pass
-
-                    try:
-                        html_snippet = pw_page.evaluate('() => document.body.innerHTML') or ''
-                        if len(html_snippet) > 50000:
-                            html_snippet = html_snippet[:50000]
-                    except Exception:
-                        pass
-
-                except PlaywrightTimeout:
-                    status = 'timeout'
-                    error_message = f'Timeout loading {page_url}'
-                except Exception as e:
-                    status = 'error'
-                    error_message = str(e)[:500]
-
-                shot = RunScreenshot.objects.create(
-                    run=run,
-                    competitor=competitor,
-                    page_url=page_url,
-                    page_name=page_name,
-                    device_type=device_type,
-                    s3_key=s3_key,
-                    viewport_width=viewport['width'],
-                    viewport_height=viewport['height'],
-                    dom_text=dom_text,
-                    html_snippet=html_snippet,
-                    status=status,
-                    error_message=error_message,
+                shot = _capture_page(
+                    pw_page, page_info['url'], page_info['name'],
+                    device_type, run, competitor, viewport
                 )
                 screenshots.append(shot)
 
             context.close()
         browser.close()
 
+    logger.info(f"[{competitor.name}] Total: {len(screenshots)} screenshots "
+               f"({sum(1 for s in screenshots if s.status == 'success')} success)")
     return screenshots

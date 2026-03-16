@@ -115,9 +115,10 @@ def execute_run(self, run_id: str):
                         "thumbnail_url": "",
                     })
 
+            success_count = sum(1 for s in screenshots if s.status == 'success')
             progress = int(5 + (completed_steps / total_steps) * 40)
             update_run_progress(run, "screenshots", progress, "screenshots",
-                                f"Screenshotted {competitor.name}")
+                                f"Captured {success_count} pages from {competitor.name}")
 
         # ═══ PHASE 3: AI ANALYSIS ═══
         update_run_progress(run, "analyzing", 50, "analyzing", "Starting AI analysis...")
