@@ -45,22 +45,21 @@ class RunDetailView(generics.RetrieveAPIView):
 
 
 class ScreenshotView(APIView):
-    """Serve screenshot PNG files by screenshot ID."""
-    permission_classes = [IsAuthenticated]
+    """Serve screenshot PNG files by screenshot ID. Public access for image loading."""
+    permission_classes = []  # Public — images are not sensitive
+    authentication_classes = []
 
     def get(self, request, screenshot_id):
-        team_ids = TeamMember.objects.filter(user=request.user).values_list('team_id', flat=True)
         try:
-            shot = RunScreenshot.objects.select_related('run__job').get(
-                id=screenshot_id,
-                run__job__team_id__in=team_ids,
-            )
+            shot = RunScreenshot.objects.get(id=screenshot_id)
         except RunScreenshot.DoesNotExist:
             raise Http404
 
-        # Find local file
+        # Find local file by UUID in s3_key
         for f in SCREENSHOTS_DIR.glob('*.png'):
             if f.stem in shot.s3_key:
-                return FileResponse(open(f, 'rb'), content_type='image/png')
+                response = FileResponse(open(f, 'rb'), content_type='image/png')
+                response['Cache-Control'] = 'public, max-age=86400'
+                return response
 
         raise Http404
