@@ -122,8 +122,6 @@ def execute_run(self, run_id: str):
         # ═══ PHASE 3: AI ANALYSIS ═══
         update_run_progress(run, "analyzing", 50, "analyzing", "Starting AI analysis...")
 
-        analysis_areas = run.job.areas or ["homepage_vp"]
-
         for competitor in accessible:
             send_ws_event(str(run.id), "run.competitor_started", {
                 "competitor_id": str(competitor.id),
@@ -146,13 +144,12 @@ def execute_run(self, run_id: str):
                 completed_steps += 1
                 continue
 
-            # Analyze each area using the best screenshot
-            primary_shot = successful_shots[0]  # homepage desktop
-            for area in analysis_areas:
+            # Analyze EACH page separately (not by area — by page)
+            for shot in successful_shots:
                 try:
-                    analyze_competitor_page(run, competitor, primary_shot, area)
+                    analyze_competitor_page(run, competitor, shot, shot.page_name)
                 except Exception as e:
-                    logger.error(f"Analysis failed for {competitor.name}/{area}: {e}")
+                    logger.error(f"Analysis failed for {competitor.name}/{shot.page_name}: {e}")
 
             completed_steps += 1
 

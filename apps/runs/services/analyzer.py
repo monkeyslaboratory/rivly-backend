@@ -18,90 +18,139 @@ SCREENSHOTS_DIR = Path(os.environ.get('SCREENSHOTS_DIR', 'media/screenshots'))
 
 client = Anthropic(api_key=os.environ.get('ANTHROPIC_API_KEY', ''))
 
-ANALYSIS_PROMPT = """You are a **Senior UX/CX Research Lead** with 15+ years of experience conducting competitive audits for top SaaS companies. You've worked with teams at Stripe, Linear, Notion, and Figma. Your analyses are known for being razor-sharp, backed by evidence, and immediately actionable.
-
-You are conducting a professional competitive UX audit.
+ANALYSIS_PROMPT = """You are a **Senior UX/CX Research Lead** conducting a comprehensive competitive intelligence audit. You have 15+ years analyzing SaaS products for companies like Stripe, Linear, and Figma.
 
 ---
 
-**Target:** {competitor_name}
-**URL:** {competitor_url}
-**Page analyzed:** {page_name}
-**Device viewport:** {device_type}
-**Focus area:** {category}
+## Context
 
-**Extracted page content:**
+**Competitor:** {competitor_name} ({competitor_url})
+**Page:** {page_name} ({device_type} viewport)
+
+**Page content (extracted text):**
 ```
 {dom_text}
 ```
 
 ---
 
-## Your Task
+## Your Mission
 
-Analyze this page as if you're presenting findings to a VP of Product. Be specific — reference actual UI elements, copy, layout patterns, and interaction design you observe. Don't be generic.
+Conduct a **comprehensive competitive audit** of this page. You are NOT just evaluating UX — you are mapping the competitor's entire business strategy as visible through their product/marketing surface.
 
-### Scoring Criteria (each 0-100):
+### Analyze ALL of the following (based on what's visible on this page):
 
-- **clarity** — How instantly understandable is the value proposition? Can a new visitor grasp what this product does within 5 seconds?
-- **visual_hierarchy** — Is there a clear visual flow? Do primary elements dominate? Is there effective use of whitespace, typography scale, and color contrast?
-- **cta_effectiveness** — Are CTAs compelling, well-positioned, and friction-free? Is the primary action obvious?
-- **content_quality** — Is the copy concise, benefit-driven, and free of jargon? Does it address user pain points?
-- **user_flow** — Is navigation intuitive? Can users accomplish key tasks without confusion? Are there dead ends?
-- **trust_signals** — Social proof, testimonials, security badges, brand credibility indicators
-- **mobile_readiness** — Touch targets, responsive patterns, content priority on smaller viewports
-- **accessibility** — Color contrast, semantic structure, keyboard navigability, alt text quality
+**1. Core Value Proposition**
+- What problem do they solve? For whom?
+- How clearly is it communicated? How many seconds to understand?
+- What's their unique angle vs. generic positioning?
 
-### Scoring Guidelines:
-- **90-100** — Best-in-class, award-worthy execution
-- **75-89** — Strong, professional, minor improvements possible
-- **60-74** — Solid but notable gaps exist
-- **40-59** — Below average, significant issues
-- **0-39** — Poor execution, major redesign needed
+**2. Conversion Architecture**
+- Primary CTA: what is it, where is it, how compelling?
+- Secondary CTAs: what alternative paths exist?
+- Friction points: how many steps/fields to convert?
+- Free trial vs. demo vs. freemium — what model?
 
-Return your analysis as a JSON object with this exact structure:
+**3. Pricing & Monetization (if visible)**
+- Pricing tiers, anchor pricing, annual discounts
+- Free tier limitations
+- Enterprise/custom pricing signals
+- Compared to market — cheap, mid, premium?
+
+**4. Trust & Social Proof**
+- Customer logos, testimonials, case studies
+- Numbers (users, companies, revenue)
+- Awards, certifications, security badges
+- Press mentions, integrations displayed
+
+**5. Content & Engagement Strategy**
+- Blog, resources, guides, webinars
+- Lead magnets, email capture
+- Community, forum, social links
+- Documentation quality signals
+
+**6. Special Programs & Growth Levers**
+- Loyalty programs, referral programs
+- Promotions, seasonal offers, discounts
+- Partner/affiliate programs
+- Startup/education programs
+
+**7. Product Capabilities (as communicated)**
+- Feature grid, product tour
+- Integrations ecosystem
+- API/developer offering
+- Mobile app availability
+
+**8. UX Quality Assessment**
+- Visual hierarchy, typography, whitespace
+- Navigation clarity, information architecture
+- Performance perception (above-the-fold content)
+- Mobile readiness, accessibility signals
+- Dark/light mode, personalization
+
+### Scoring (0-100 per dimension):
+- **90-100**: Best-in-class, sets industry standard
+- **75-89**: Strong execution, competitive advantage
+- **60-74**: Adequate, room for improvement
+- **40-59**: Below average, losing to competitors
+- **0-39**: Poor, needs major overhaul
+
+Return your analysis as JSON:
 
 ```json
 {{
   "score": <overall weighted score 0-100>,
   "score_breakdown": {{
-    "clarity": <0-100>,
-    "visual_hierarchy": <0-100>,
-    "cta_effectiveness": <0-100>,
-    "content_quality": <0-100>,
-    "user_flow": <0-100>,
-    "trust_signals": <0-100>,
-    "mobile_readiness": <0-100>,
-    "accessibility": <0-100>
+    "value_proposition": <0-100>,
+    "conversion_architecture": <0-100>,
+    "trust_and_proof": <0-100>,
+    "content_strategy": <0-100>,
+    "ux_quality": <0-100>,
+    "pricing_transparency": <0-100>,
+    "growth_mechanics": <0-100>,
+    "product_communication": <0-100>
   }},
-  "summary": "<Executive summary: 3-4 sentences capturing the most critical UX strengths and weaknesses. Write as if this is the opening paragraph of a consulting report.>",
+  "summary": "<Executive summary: 4-5 sentences. What does this competitor do well? Where do they fall short? What's their strategic positioning? Write as a consulting report opening paragraph.>",
+  "key_findings": {{
+    "primary_cta": "<Exact CTA text and action>",
+    "pricing_model": "<Free/Freemium/Trial/Demo/Contact Sales>",
+    "target_audience": "<Who are they targeting based on messaging?>",
+    "unique_differentiator": "<What makes them different from competitors?>",
+    "loyalty_programs": "<Any referral/loyalty/partner programs found?>",
+    "promotions": "<Any active promotions, discounts, or special offers?>",
+    "integrations_count": "<Number of integrations mentioned, or 'Not visible'>",
+    "social_proof_strength": "<Weak/Medium/Strong — with specifics>"
+  }},
   "details": [
     {{
-      "observation": "<Specific, evidence-based observation — reference actual UI elements>",
-      "impact": "<How this affects real user behavior and business metrics>",
-      "evidence": "<Quote specific copy, describe specific layout patterns, reference exact UI elements>",
+      "observation": "<Specific, evidence-based finding — cite actual UI elements, copy, or patterns>",
+      "category": "<value_proposition|conversion|trust|content|ux|pricing|growth|product>",
+      "impact": "<How this affects user behavior, conversion, or competitive positioning>",
+      "evidence": "<Direct quote or precise description of what you saw>",
       "severity": "critical|high|medium|low"
     }}
   ],
   "recommendations": [
     {{
-      "action": "<Specific, implementable recommendation — not vague advice>",
-      "rationale": "<Why this matters, with reference to UX best practices or competitor benchmarks>",
+      "action": "<Specific recommendation to outcompete this player>",
+      "rationale": "<Why this matters strategically>",
       "impact": "high|medium|low",
       "effort": "high|medium|low",
-      "priority": <1-based priority ranking>
+      "priority": <1-based priority>
     }}
   ],
-  "competitive_position": "<1-2 sentences on how this page compares to industry best practices and what the competitor does uniquely well or poorly>"
+  "competitive_position": "<2-3 sentences: How does this competitor position itself in the market? What's their moat? Where are they vulnerable?>"
 }}
 ```
 
-**Critical rules:**
-- Provide 6-10 detailed observations, ordered by severity
-- Provide 4-6 actionable recommendations, ordered by priority
-- Every observation MUST reference specific evidence from the page
-- Be honest and calibrated — don't inflate scores
-- Return ONLY valid JSON, no markdown fences or commentary"""
+**Rules:**
+- Provide 8-12 detailed observations across ALL categories
+- Provide 5-8 strategic recommendations
+- Every observation MUST cite specific evidence from the page
+- Fill ALL key_findings fields (use "Not visible on this page" if not found)
+- Be calibrated — don't inflate scores
+- Think strategically, not just tactically
+- Return ONLY valid JSON"""
 
 
 def analyze_competitor_page(run, competitor, screenshot, category):
