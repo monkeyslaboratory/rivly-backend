@@ -16,7 +16,8 @@ class RunListView(generics.ListAPIView):
         ).values_list('team_id', flat=True)
         queryset = Run.objects.filter(job__team_id__in=team_ids)
 
-        job_id = self.request.query_params.get('job_id')
+        # Support both ?job_id= query param and /jobs/{id}/runs/ URL
+        job_id = self.kwargs.get('job_id') or self.request.query_params.get('job_id')
         if job_id:
             queryset = queryset.filter(job_id=job_id)
 
