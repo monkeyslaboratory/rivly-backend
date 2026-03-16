@@ -297,15 +297,49 @@ def screenshot_competitor(run, competitor, device_types=None, pages=None):
                 pw_page.goto(base_url, wait_until='domcontentloaded', timeout=25000)
                 pw_page.wait_for_timeout(3000)
 
-                # Step 2: Discover all pages
+                # Step 2: Discover all pages from DOM
                 discovered = discover_all_pages(pw_page, base_url, origin)
                 pages_to_capture.extend(discovered)
 
-                logger.info(f"[{competitor.name}] Will capture {len(pages_to_capture)} pages: "
-                           f"{[p['name'] for p in pages_to_capture]}")
-
             except Exception as e:
                 logger.warning(f"Homepage load failed for {competitor.name}: {e}")
+
+            # Step 2b: Fallback — if discovery found nothing, probe common paths
+            if len(pages_to_capture) <= 1:
+                logger.info(f"[{competitor.name}] No links discovered, probing common paths...")
+                common_paths = [
+                    ('pricing', '/pricing'), ('features', '/features'), ('product', '/product'),
+                    ('about', '/about'), ('about', '/about-us'), ('contact', '/contact'),
+                    ('blog', '/blog'), ('docs', '/docs'), ('faq', '/faq'),
+                    ('signup', '/signup'), ('signup', '/sign-up'), ('signup', '/register'),
+                    ('login', '/login'), ('login', '/sign-in'),
+                    ('terms', '/terms'), ('privacy', '/privacy'),
+                    ('integrations', '/integrations'), ('customers', '/customers'),
+                    ('careers', '/careers'), ('partners', '/partners'),
+                    ('promotions', '/promotions'), ('promotions', '/offers'),
+                    ('catalog', '/catalog'), ('catalog', '/products'),
+                    ('bonus', '/bonus'), ('loyalty', '/loyalty'),
+                    ('live', '/live'), ('sports', '/sports'), ('casino', '/casino'),
+                    ('games', '/games'), ('slots', '/slots'),
+                ]
+                probed_names = set()
+                for name, path in common_paths:
+                    if name in probed_names:
+                        continue
+                    probe_url = f"{origin}{path}"
+                    try:
+                        resp = pw_page.goto(probe_url, wait_until='domcontentloaded', timeout=8000)
+                        if resp and resp.status < 400:
+                            pages_to_capture.append({'name': name, 'url': probe_url})
+                            probed_names.add(name)
+                            logger.info(f"[{competitor.name}] Probed OK: {path}")
+                            if len(pages_to_capture) >= MAX_PAGES:
+                                break
+                    except Exception:
+                        pass
+
+            logger.info(f"[{competitor.name}] Will capture {len(pages_to_capture)} pages: "
+                       f"{[p['name'] for p in pages_to_capture]}")
 
             # Step 3: Capture ALL pages
             for i, page_info in enumerate(pages_to_capture):
