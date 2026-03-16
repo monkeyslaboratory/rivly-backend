@@ -11,8 +11,10 @@ class Job(models.Model):
         ARCHIVED = 'archived', 'Archived'
 
     class ScheduleFrequency(models.TextChoices):
+        ONCE = 'once', 'Once'
         DAILY = 'daily', 'Daily'
         WEEKLY = 'weekly', 'Weekly'
+        BIWEEKLY = 'biweekly', 'Bi-weekly'
         MONTHLY = 'monthly', 'Monthly'
 
     class DeviceType(models.TextChoices):
