@@ -92,13 +92,9 @@ class AnalyzeProductView(APIView):
     def post(self, request):
         serializer = AnalyzeProductRequestSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-        # Placeholder mock response
-        return Response({
-            'url': serializer.validated_data['url'],
-            'name': 'Example Product',
-            'description': 'An example product description extracted from the URL.',
-            'category': 'SaaS',
-        })
+        from apps.jobs.services.product_analyzer import analyze_product_url
+        result = analyze_product_url(serializer.validated_data['url'])
+        return Response(result)
 
 
 class DiscoverCompetitorsView(APIView):
@@ -107,14 +103,24 @@ class DiscoverCompetitorsView(APIView):
     def post(self, request):
         serializer = DiscoverCompetitorsRequestSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-        # Placeholder mock response
-        return Response({
-            'competitors': [
-                {'name': 'Competitor A', 'url': 'https://competitor-a.com', 'relevance': 0.95},
-                {'name': 'Competitor B', 'url': 'https://competitor-b.com', 'relevance': 0.87},
-                {'name': 'Competitor C', 'url': 'https://competitor-c.com', 'relevance': 0.78},
-            ]
-        })
+        from apps.jobs.services.product_analyzer import analyze_product_url
+        from apps.jobs.services.competitor_discovery import discover_competitors
+        product_url = serializer.validated_data['product_url']
+        product_meta = analyze_product_url(product_url)
+        competitors = discover_competitors(product_meta)
+        return Response(competitors)
+
+
+class CheckAccessView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        urls = request.data.get('urls', [])
+        if not urls:
+            return Response({'error': 'No URLs provided'}, status=status.HTTP_400_BAD_REQUEST)
+        from apps.jobs.services.access_checker import check_urls_access
+        results = check_urls_access(urls)
+        return Response(results)
 
 
 class SuggestAreasView(APIView):
@@ -123,7 +129,7 @@ class SuggestAreasView(APIView):
     def post(self, request):
         serializer = SuggestAreasRequestSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-        # Placeholder mock response
+        # Hardcoded — areas are predefined
         return Response({
             'areas': [
                 {'key': 'onboarding', 'label': 'Onboarding Flow', 'description': 'First-time user experience'},

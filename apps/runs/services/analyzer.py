@@ -145,7 +145,8 @@ def analyze_competitor_page(run, competitor, screenshot, category):
         )
 
         # Update run cost
-        run.cost_api_usd += cost_usd
+        from decimal import Decimal
+        run.cost_api_usd += Decimal(str(cost_usd))
         run.save(update_fields=['cost_api_usd'])
 
         return report
