@@ -73,14 +73,16 @@ class JobTriggerRunView(APIView):
 
         run = Run.objects.create(job=job, triggered_by=request.user)
 
-        # Use Celery if available, otherwise run synchronously for local dev
-        use_sync = os.environ.get('RUN_SYNC', 'true').lower() == 'true'
-        if use_sync:
-            from apps.runs.tasks import execute_run
-            execute_run(str(run.id))
-        else:
-            from apps.runs.tasks import execute_run
+        # Run in background thread for local dev, Celery for production
+        from apps.runs.tasks import execute_run
+        use_celery = os.environ.get('USE_CELERY', 'false').lower() == 'true'
+        if use_celery:
             execute_run.delay(str(run.id))
+        else:
+            import threading
+            thread = threading.Thread(target=execute_run, args=(str(run.id),))
+            thread.daemon = True
+            thread.start()
 
         from apps.runs.serializers import RunSerializer
         return Response(RunSerializer(run).data, status=status.HTTP_201_CREATED)
