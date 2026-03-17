@@ -84,11 +84,20 @@ class RunApproveView(APIView):
         if remove_ids:
             RunScreenshot.objects.filter(run=run, id__in=remove_ids).delete()
 
+        # Mark as approved immediately so frontend sees the transition
+        run.status = 'approved'
+        run.save(update_fields=['status'])
+
         # Start analysis phase
-        from apps.runs.tasks import execute_analysis
-        thread = threading.Thread(target=execute_analysis, args=(str(run.id),))
-        thread.daemon = True
-        thread.start()
+        use_celery = os.environ.get('USE_CELERY', 'false').lower() == 'true'
+        if use_celery:
+            from apps.runs.tasks import execute_analysis
+            execute_analysis.delay(str(run.id))
+        else:
+            from apps.runs.tasks import _run_analysis
+            thread = threading.Thread(target=_run_analysis, args=(str(run.id),))
+            thread.daemon = True
+            thread.start()
 
         return Response({'status': 'approved', 'run_id': str(run.id)})
 
@@ -118,12 +127,25 @@ class RunAddPagesView(APIView):
 
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=True)
-            page = browser.new_page(viewport={'width': 1440, 'height': 900})
+            context = browser.new_context(
+                viewport={'width': 1440, 'height': 900},
+                user_agent=(
+                    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) '
+                    'AppleWebKit/537.36 (KHTML, like Gecko) '
+                    'Chrome/120.0.0.0 Safari/537.36'
+                ),
+            )
+            # Inject saved cookies from interactive browser session
+            if run.auth_cookies:
+                context.add_cookies(run.auth_cookies)
+            page = context.new_page()
+            has_cookies = bool(run.auth_cookies)
             for url in urls:
                 full_url = url if url.startswith('http') else f'https://{url}'
                 name = urlparse(full_url).path.strip('/').split('/')[0] or 'custom'
-                shot = _capture_page(page, full_url, f'custom_{name}', 'desktop', run, competitor, {'width': 1440, 'height': 900})
+                shot = _capture_page(page, full_url, f'custom_{name}', 'desktop', run, competitor, {'width': 1440, 'height': 900}, skip_auth_check=has_cookies)
                 new_shots.append({'id': str(shot.id), 'page_name': shot.page_name, 'status': shot.status})
+            context.close()
             browser.close()
 
         return Response({'added': new_shots})
@@ -155,6 +177,29 @@ class RunAuthCrawlView(APIView):
         thread.start()
 
         return Response({'status': 'auth_crawl_started'})
+
+
+class RunBrowserSessionView(APIView):
+    """Start an interactive browser session for manual login."""
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, pk):
+        team_ids = TeamMember.objects.filter(user=request.user).values_list('team_id', flat=True)
+        try:
+            run = Run.objects.get(pk=pk, job__team_id__in=team_ids)
+        except Run.DoesNotExist:
+            return Response({'detail': 'Run not found.'}, status=404)
+
+        # Optionally store login_url in auth_credentials
+        login_url = request.data.get('login_url', '')
+        if login_url:
+            creds = run.auth_credentials or {}
+            creds['login_url'] = login_url
+            run.auth_credentials = creds
+            run.save(update_fields=['auth_credentials'])
+
+        ws_url = f'ws://localhost:8001/ws/browser/{run.id}/'
+        return Response({'ws_url': ws_url, 'run_id': str(run.id)})
 
 
 class RunSubmitCodeView(APIView):

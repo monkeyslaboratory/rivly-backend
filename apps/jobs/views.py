@@ -74,13 +74,14 @@ class JobTriggerRunView(APIView):
         run = Run.objects.create(job=job, triggered_by=request.user)
 
         # Run in background thread for local dev, Celery for production
-        from apps.runs.tasks import execute_discovery
         use_celery = os.environ.get('USE_CELERY', 'false').lower() == 'true'
         if use_celery:
+            from apps.runs.tasks import execute_discovery
             execute_discovery.delay(str(run.id))
         else:
+            from apps.runs.tasks import _run_discovery
             import threading
-            thread = threading.Thread(target=execute_discovery, args=(str(run.id),))
+            thread = threading.Thread(target=_run_discovery, args=(str(run.id),))
             thread.daemon = True
             thread.start()
 

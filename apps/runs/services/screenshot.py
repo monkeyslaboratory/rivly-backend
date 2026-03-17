@@ -439,42 +439,37 @@ def _capture_page(pw_page, page_url: str, page_name: str, device_type: str,
 
             # Detect auth wall / login form (skip for authenticated recaptures)
             if not skip_auth_check:
-              try:
-                has_auth_wall = pw_page.evaluate('''() => {
-                    const body = document.body;
-                    if (!body) return false;
-                    const text = body.innerText.toLowerCase();
-                    const html = body.innerHTML.toLowerCase();
+                try:
+                    has_auth_wall = pw_page.evaluate('''() => {
+                        const body = document.body;
+                        if (!body) return false;
+                        const text = body.innerText.toLowerCase();
+                        const html = body.innerHTML.toLowerCase();
 
-                    // Check for login form indicators
-                    const hasPasswordField = document.querySelector('input[type="password"]') !== null;
-                    const hasLoginForm = document.querySelector('form[action*="login"], form[action*="signin"], form[action*="auth"]') !== null;
+                        const hasPasswordField = document.querySelector('input[type="password"]') !== null;
+                        const hasLoginForm = document.querySelector('form[action*="login"], form[action*="signin"], form[action*="auth"]') !== null;
 
-                    // Check for login-related text patterns
-                    const loginPatterns = [
-                        'sign in', 'log in', 'login', 'войти', 'авторизац',
-                        'enter your password', 'enter your email',
-                        'create an account', 'don\\'t have an account',
-                        'forgot password', 'забыли пароль',
-                        'access denied', 'unauthorized', '401',
-                        'please log in', 'authentication required',
-                    ];
-                    const hasLoginText = loginPatterns.some(p => text.includes(p));
+                        const loginPatterns = [
+                            'sign in', 'log in', 'login', 'войти', 'авторизац',
+                            'enter your password', 'enter your email',
+                            'create an account', 'don\\'t have an account',
+                            'forgot password', 'забыли пароль',
+                            'access denied', 'unauthorized', '401',
+                            'please log in', 'authentication required',
+                        ];
+                        const hasLoginText = loginPatterns.some(p => text.includes(p));
 
-                    // Strong signal: password field + login text
-                    if (hasPasswordField && hasLoginText) return true;
-                    // Medium signal: login form
-                    if (hasLoginForm) return true;
-                    // Weak signal: page is mostly a login prompt (short content + login text)
-                    if (hasLoginText && text.length < 500) return true;
+                        if (hasPasswordField && hasLoginText) return true;
+                        if (hasLoginForm) return true;
+                        if (hasLoginText && text.length < 500) return true;
 
-                    return false;
-                }''')
+                        return false;
+                    }''')
 
-                  if has_auth_wall:
-                      status = 'auth_required'
-              except Exception:
-                  pass
+                    if has_auth_wall:
+                        status = 'auth_required'
+                except Exception:
+                    pass
 
     except PlaywrightTimeout:
         status = 'timeout'
@@ -1101,3 +1096,79 @@ def submit_verification_code(run_id: str):
                 browser.close()
             except Exception:
                 pass
+
+
+def recrawl_with_cookies(run_id: str):
+    """Re-crawl auth_required pages using cookies captured from interactive browser session."""
+    from apps.runs.models import Run
+
+    run = Run.objects.get(id=run_id)
+    cookies = run.auth_cookies
+    if not cookies:
+        logger.warning(f"recrawl_with_cookies: no cookies for run {run_id}")
+        return
+
+    auth_shots = RunScreenshot.objects.filter(run=run, status='auth_required')
+    if not auth_shots.exists():
+        logger.info(f"recrawl_with_cookies: no auth_required pages for run {run_id}")
+        return
+
+    competitor = auth_shots.first().competitor
+
+    run.auth_status = 'logging_in'
+    run.auth_message = 'Re-crawling with browser session cookies...'
+    run.save(update_fields=['auth_status', 'auth_message'])
+
+    captured = 0
+
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            context = browser.new_context(
+                viewport=VIEWPORTS['desktop'],
+                user_agent=(
+                    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) '
+                    'AppleWebKit/537.36 (KHTML, like Gecko) '
+                    'Chrome/120.0.0.0 Safari/537.36'
+                ),
+            )
+            context.add_cookies(cookies)
+            page = context.new_page()
+
+            for shot in auth_shots:
+                try:
+                    page_url = shot.page_url
+                    page_name = shot.page_name
+                    device_type = shot.device_type
+                    viewport = VIEWPORTS.get(device_type, VIEWPORTS['desktop'])
+                    shot.delete()
+
+                    new_shot = _capture_page(
+                        page, page_url, page_name, device_type,
+                        run, competitor, viewport, skip_auth_check=True,
+                    )
+
+                    if new_shot.status == 'success':
+                        captured += 1
+                    elif new_shot.status == 'auth_required':
+                        new_shot.status = 'auth_failed'
+                        new_shot.save(update_fields=['status'])
+
+                except Exception as e:
+                    logger.warning(f"recrawl_with_cookies failed for {shot.page_url}: {e}")
+
+            run.auth_status = 'logged_in'
+            run.auth_message = f'Done. {captured} authenticated pages captured via browser session.'
+            run.save(update_fields=['auth_status', 'auth_message'])
+
+            try:
+                context.close()
+                browser.close()
+            except Exception:
+                pass
+
+    except Exception as e:
+        logger.error(f"recrawl_with_cookies error: {e}")
+        run.auth_status = 'auth_failed'
+        run.auth_message = f'Cookie recrawl error: {str(e)[:300]}'
+        run.save(update_fields=['auth_status', 'auth_message'])

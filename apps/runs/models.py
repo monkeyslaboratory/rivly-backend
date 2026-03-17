@@ -36,6 +36,7 @@ class Run(models.Model):
     auth_status = models.CharField(max_length=30, blank=True, default='')
     # '', 'logging_in', 'captcha_required', 'code_required', 'logged_in', 'auth_failed'
     auth_message = models.CharField(max_length=500, blank=True, default='')
+    auth_cookies = models.JSONField(default=list, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:

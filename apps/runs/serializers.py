@@ -51,9 +51,14 @@ class RunSerializer(serializers.ModelSerializer):
     overall_scores = RunOverallScoreSerializer(many=True, read_only=True)
     comparison = RunComparisonSerializer(read_only=True)
     has_auth_pages = serializers.SerializerMethodField()
+    auth_cookies = serializers.SerializerMethodField()
 
     def get_has_auth_pages(self, obj):
         return obj.screenshots.filter(status='auth_required').exists()
+
+    def get_auth_cookies(self, obj):
+        """Return list (not contents) so frontend knows if cookies exist."""
+        return obj.auth_cookies if obj.auth_cookies else []
 
     class Meta:
         model = Run
@@ -62,7 +67,7 @@ class RunSerializer(serializers.ModelSerializer):
             'started_at', 'completed_at', 'duration_seconds', 'cost_api_usd',
             'error_log', 'retry_count',
             'screenshots', 'reports', 'overall_scores', 'comparison',
-            'has_auth_pages', 'auth_status', 'auth_message', 'created_at',
+            'has_auth_pages', 'auth_status', 'auth_message', 'auth_cookies', 'created_at',
         ]
         read_only_fields = ['id', 'created_at']
 
