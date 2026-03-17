@@ -344,8 +344,8 @@ def discover_all_pages(page, base_url: str, origin: str) -> list:
 
 
 def _capture_page(pw_page, page_url: str, page_name: str, device_type: str,
-                   run, competitor, viewport: dict) -> RunScreenshot:
-    """Capture a single page — screenshot + DOM text extraction."""
+                   run, competitor, viewport: dict, skip_auth_check: bool = False) -> RunScreenshot:
+    """Capture a single page. Set skip_auth_check=True for authenticated captures."""
     file_id = str(uuid.uuid4())
     s3_key = f"runs/{run.id}/{competitor.id}/{device_type}_{page_name}_{file_id}.png"
     local_path = SCREENSHOTS_DIR / f"{file_id}.png"
@@ -437,8 +437,9 @@ def _capture_page(pw_page, page_url: str, page_name: str, device_type: str,
             except Exception:
                 pass
 
-            # Detect auth wall / login form
-            try:
+            # Detect auth wall / login form (skip for authenticated recaptures)
+            if not skip_auth_check:
+              try:
                 has_auth_wall = pw_page.evaluate('''() => {
                     const body = document.body;
                     if (!body) return false;
@@ -470,11 +471,10 @@ def _capture_page(pw_page, page_url: str, page_name: str, device_type: str,
                     return false;
                 }''')
 
-                if has_auth_wall:
-                    status = 'auth_required'
-
-            except Exception:
-                pass
+                  if has_auth_wall:
+                      status = 'auth_required'
+              except Exception:
+                  pass
 
     except PlaywrightTimeout:
         status = 'timeout'
@@ -853,7 +853,8 @@ def authenticated_crawl(run_id: str):
             captured = 0
             for shot in auth_shots:
                 new_shot = _capture_page(page, shot.page_url, f"{shot.page_name}_authenticated",
-                                         'desktop', run, competitor, VIEWPORTS['desktop'])
+                                         'desktop', run, competitor, VIEWPORTS['desktop'],
+                                         skip_auth_check=True)
                 captured += 1
                 run.auth_message = f'Re-captured {captured}/{auth_shots.count()} pages...'
                 run.save(update_fields=['auth_message'])
@@ -1076,7 +1077,8 @@ def submit_verification_code(run_id: str):
             captured = 0
             for shot in auth_shots:
                 new_shot = _capture_page(page, shot.page_url, f"{shot.page_name}_authenticated",
-                                         'desktop', run, competitor, VIEWPORTS['desktop'])
+                                         'desktop', run, competitor, VIEWPORTS['desktop'],
+                                         skip_auth_check=True)
                 captured += 1
                 run.auth_message = f'Re-captured {captured}/{auth_shots.count()} pages...'
                 run.save(update_fields=['auth_message'])
