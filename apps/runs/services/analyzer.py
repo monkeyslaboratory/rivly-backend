@@ -150,7 +150,9 @@ Return your analysis as JSON:
 - Fill ALL key_findings fields (use "Not visible on this page" if not found)
 - Be calibrated — don't inflate scores
 - Think strategically, not just tactically
-- Return ONLY valid JSON"""
+- Return ONLY valid JSON
+
+**IMPORTANT: Write ALL text content (summary, observations, evidence, recommendations, actions, rationale) in {language}. JSON keys must remain in English.**"""
 
 
 def analyze_competitor_page(run, competitor, screenshot, category):
@@ -179,6 +181,13 @@ def analyze_competitor_page(run, competitor, screenshot, category):
             }
         })
 
+    # Determine user language
+    user_locale = 'English'
+    if run.triggered_by:
+        user_locale_code = getattr(run.triggered_by, 'locale', 'en')
+        if user_locale_code == 'ru':
+            user_locale = 'Russian'
+
     prompt_text = ANALYSIS_PROMPT.format(
         competitor_name=competitor.name,
         competitor_url=competitor.url,
@@ -186,6 +195,7 @@ def analyze_competitor_page(run, competitor, screenshot, category):
         device_type=screenshot.device_type,
         category=category,
         dom_text=screenshot.dom_text[:12000] if screenshot.dom_text else '(no text extracted)',
+        language=user_locale,
     )
 
     messages_content.append({

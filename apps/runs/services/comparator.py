@@ -106,7 +106,9 @@ Rules:
 - Flow comparison: 3-5 core flows relevant to the niche
 - Recommendations: 8-12 items, ordered by priority
 - Be brutally honest — if competitors are better, say so
-- Return ONLY valid JSON"""
+- Return ONLY valid JSON
+
+**IMPORTANT: Write ALL text content (executive_summary, descriptions, recommendations, findings, competitive_position) in {language}. JSON keys and enum values (yes/no/partial, high/medium/low) must remain in English.**"""
 
 
 def generate_comparison(run):
@@ -142,11 +144,19 @@ def generate_comparison(run):
 
     audit_summaries = "\n---\n".join(summaries)
 
+    # Determine user language
+    user_locale = 'English'
+    if run.triggered_by:
+        user_locale_code = getattr(run.triggered_by, 'locale', 'en')
+        if user_locale_code == 'ru':
+            user_locale = 'Russian'
+
     prompt = COMPARISON_PROMPT.format(
         product_name=product_name,
         product_url=product_url,
         competitor_list=competitor_list,
         audit_summaries=audit_summaries[:15000],
+        language=user_locale,
     )
 
     try:
