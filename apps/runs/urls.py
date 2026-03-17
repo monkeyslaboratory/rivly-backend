@@ -1,5 +1,5 @@
 from django.urls import path
-from .views import RunListView, RunDetailView, ScreenshotView, RunApproveView, RunAddPagesView, RunAuthCrawlView
+from .views import RunListView, RunDetailView, ScreenshotView, RunApproveView, RunAddPagesView, RunAuthCrawlView, RunSubmitCodeView
 
 urlpatterns = [
     path('', RunListView.as_view(), name='run-list'),
@@ -8,5 +8,6 @@ urlpatterns = [
     path('<uuid:pk>/approve/', RunApproveView.as_view(), name='run-approve'),
     path('<uuid:pk>/add-pages/', RunAddPagesView.as_view(), name='run-add-pages'),
     path('<uuid:pk>/auth-crawl/', RunAuthCrawlView.as_view(), name='run-auth-crawl'),
+    path('<uuid:pk>/submit-code/', RunSubmitCodeView.as_view(), name='run-submit-code'),
     path('screenshots/<uuid:screenshot_id>/', ScreenshotView.as_view(), name='screenshot-serve'),
 ]

@@ -155,3 +155,33 @@ class RunAuthCrawlView(APIView):
         thread.start()
 
         return Response({'status': 'auth_crawl_started'})
+
+
+class RunSubmitCodeView(APIView):
+    """Submit captcha text or 2FA code to continue auth."""
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, pk):
+        team_ids = TeamMember.objects.filter(user=request.user).values_list('team_id', flat=True)
+        try:
+            run = Run.objects.get(pk=pk, job__team_id__in=team_ids)
+        except Run.DoesNotExist:
+            return Response({'detail': 'Run not found.'}, status=404)
+
+        code = request.data.get('code', '')
+        if not code:
+            return Response({'detail': 'Code required.'}, status=400)
+
+        # Store code and re-trigger auth
+        creds = run.auth_credentials or {}
+        creds['verification_code'] = code
+        run.auth_credentials = creds
+        run.save(update_fields=['auth_credentials'])
+
+        # Re-trigger auth crawl (it will use the stored code)
+        from apps.runs.services.screenshot import submit_verification_code
+        thread = threading.Thread(target=submit_verification_code, args=(str(run.id),))
+        thread.daemon = True
+        thread.start()
+
+        return Response({'status': 'code_submitted'})

@@ -623,7 +623,7 @@ def screenshot_competitor(run, competitor, device_types=None, pages=None):
 
 
 def authenticated_crawl(run_id: str):
-    """Re-crawl auth-required pages after logging in with provided credentials."""
+    """Interactive auth: login, detect captcha/2FA, report status."""
     from apps.runs.models import Run
 
     run = Run.objects.get(id=run_id)
@@ -635,78 +635,467 @@ def authenticated_crawl(run_id: str):
     password = creds.get('password', '')
     login_url = creds.get('login_url', '')
 
-    # Find auth_required screenshots
     auth_shots = RunScreenshot.objects.filter(run=run, status='auth_required')
     if not auth_shots.exists():
         return
 
     competitor = auth_shots.first().competitor
 
+    # Update status
+    run.auth_status = 'logging_in'
+    run.auth_message = 'Navigating to login page...'
+    run.save(update_fields=['auth_status', 'auth_message'])
+
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
-        context = browser.new_context(viewport=VIEWPORTS['desktop'])
+        context = browser.new_context(viewport=VIEWPORTS['desktop'],
+            user_agent='Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36')
         page = context.new_page()
 
-        # Step 1: Navigate to login page and authenticate
         target_login = login_url or f"{competitor.url.rstrip('/')}/login"
-        try:
-            page.goto(target_login, wait_until='networkidle', timeout=20000)
-            page.wait_for_timeout(2000)
 
-            # Find and fill email/username field
+        try:
+            page.goto(target_login, wait_until='networkidle', timeout=25000)
+            page.wait_for_timeout(3000)
+
+            run.auth_message = 'Filling credentials...'
+            run.save(update_fields=['auth_message'])
+
+            # Fill email
+            email_filled = False
             email_selectors = [
                 'input[type="email"]', 'input[name="email"]', 'input[name="login"]',
-                'input[name="username"]', 'input[id*="email"]', 'input[id*="login"]',
+                'input[name="username"]', 'input[name="phone"]',
+                'input[id*="email" i]', 'input[id*="login" i]', 'input[id*="user" i]',
                 'input[placeholder*="email" i]', 'input[placeholder*="логин" i]',
+                'input[placeholder*="телефон" i]', 'input[placeholder*="phone" i]',
+                'input[autocomplete="email"]', 'input[autocomplete="username"]',
             ]
             for sel in email_selectors:
-                el = page.query_selector(sel)
-                if el:
-                    el.fill(email)
-                    break
+                try:
+                    el = page.query_selector(sel)
+                    if el and el.is_visible():
+                        el.click()
+                        el.fill(email)
+                        email_filled = True
+                        break
+                except Exception:
+                    continue
 
-            # Find and fill password field
-            pw_el = page.query_selector('input[type="password"]')
-            if pw_el:
-                pw_el.fill(password)
+            if not email_filled:
+                # Try first visible text input
+                try:
+                    inputs = page.query_selector_all('input[type="text"], input:not([type])')
+                    for inp in inputs:
+                        if inp.is_visible():
+                            inp.fill(email)
+                            email_filled = True
+                            break
+                except Exception:
+                    pass
 
-            # Find and click submit button
+            # Fill password
+            pw_filled = False
+            try:
+                pw_el = page.query_selector('input[type="password"]')
+                if pw_el and pw_el.is_visible():
+                    pw_el.click()
+                    pw_el.fill(password)
+                    pw_filled = True
+            except Exception:
+                pass
+
+            if not email_filled or not pw_filled:
+                run.auth_status = 'auth_failed'
+                run.auth_message = 'Could not find login form fields'
+                run.save(update_fields=['auth_status', 'auth_message'])
+                browser.close()
+                return
+
+            run.auth_message = 'Submitting login form...'
+            run.save(update_fields=['auth_message'])
+
+            # Submit
+            submitted = False
             submit_selectors = [
                 'button[type="submit"]', 'input[type="submit"]',
                 'button:has-text("Log in")', 'button:has-text("Sign in")',
                 'button:has-text("Войти")', 'button:has-text("Login")',
+                'button:has-text("Submit")', 'button:has-text("Вход")',
+                'button:has-text("Continue")', 'button:has-text("Продолжить")',
             ]
             for sel in submit_selectors:
-                btn = page.query_selector(sel)
-                if btn:
-                    btn.click()
-                    break
+                try:
+                    btn = page.query_selector(sel)
+                    if btn and btn.is_visible():
+                        btn.click()
+                        submitted = True
+                        break
+                except Exception:
+                    continue
 
-            # Wait for navigation after login
+            if not submitted:
+                # Try pressing Enter
+                try:
+                    page.keyboard.press('Enter')
+                    submitted = True
+                except Exception:
+                    pass
+
+            # Wait for response
             page.wait_for_timeout(5000)
 
-            logger.info(f"Authenticated crawl: logged in at {target_login}")
+            # Check what happened after submit
+
+            # 1. Check for CAPTCHA
+            try:
+                has_captcha = page.evaluate('''() => {
+                    const html = document.body.innerHTML.toLowerCase();
+                    const text = document.body.innerText.toLowerCase();
+                    return (
+                        document.querySelector('iframe[src*="captcha"]') !== null ||
+                        document.querySelector('iframe[src*="recaptcha"]') !== null ||
+                        document.querySelector('[class*="captcha" i]') !== null ||
+                        document.querySelector('[id*="captcha" i]') !== null ||
+                        document.querySelector('.g-recaptcha') !== null ||
+                        document.querySelector('[data-sitekey]') !== null ||
+                        html.includes('captcha') ||
+                        text.includes('i\\'m not a robot') ||
+                        text.includes('verify you are human') ||
+                        text.includes('введите код с картинки') ||
+                        text.includes('подтвердите, что вы не робот')
+                    );
+                }''')
+
+                if has_captcha:
+                    # Screenshot the captcha
+                    _capture_page(page, page.url, 'captcha_challenge', 'desktop',
+                                  run, competitor, VIEWPORTS['desktop'])
+                    run.auth_status = 'captcha_required'
+                    run.auth_message = 'Captcha detected. Screenshot saved as captcha_challenge.'
+                    run.save(update_fields=['auth_status', 'auth_message'])
+                    context.close()
+                    browser.close()
+                    return
+            except Exception:
+                pass
+
+            # 2. Check for 2FA/verification code
+            try:
+                has_code_input = page.evaluate('''() => {
+                    const text = document.body.innerText.toLowerCase();
+                    const inputs = document.querySelectorAll('input[type="text"], input[type="number"], input[type="tel"]');
+                    const hasShortInput = Array.from(inputs).some(i => {
+                        const ml = i.getAttribute('maxlength');
+                        return i.offsetParent !== null && ml && parseInt(ml) <= 8;
+                    });
+                    return hasShortInput && (
+                        text.includes('verification') || text.includes('code') ||
+                        text.includes('confirm') || text.includes('подтверд') ||
+                        text.includes('код') || text.includes('sms') ||
+                        text.includes('one-time') || text.includes('otp') ||
+                        text.includes('2fa') || text.includes('two-factor')
+                    );
+                }''')
+
+                if has_code_input:
+                    _capture_page(page, page.url, 'verification_code', 'desktop',
+                                  run, competitor, VIEWPORTS['desktop'])
+                    run.auth_status = 'code_required'
+                    run.auth_message = 'Verification code required. Check your email/phone.'
+                    run.save(update_fields=['auth_status', 'auth_message'])
+                    context.close()
+                    browser.close()
+                    return
+            except Exception:
+                pass
+
+            # 3. Check if still on login page (auth failed)
+            try:
+                still_login = page.evaluate('''() => {
+                    const pw = document.querySelector('input[type="password"]');
+                    if (pw && pw.offsetParent !== null) return true;
+                    const text = document.body.innerText.toLowerCase();
+                    return (text.includes('invalid') || text.includes('incorrect') ||
+                            text.includes('wrong') || text.includes('неверн') ||
+                            text.includes('ошибка') || text.includes('failed'));
+                }''')
+
+                if still_login:
+                    # Try to get error message
+                    error_msg = page.evaluate('''() => {
+                        const selectors = ['[class*="error" i]', '[class*="alert" i]', '[role="alert"]',
+                                          '[class*="message" i]'];
+                        for (const sel of selectors) {
+                            const el = document.querySelector(sel);
+                            if (el && el.textContent.trim()) return el.textContent.trim().substring(0, 200);
+                        }
+                        return 'Login failed - credentials may be incorrect';
+                    }''') or 'Login failed'
+
+                    run.auth_status = 'auth_failed'
+                    run.auth_message = error_msg
+                    run.save(update_fields=['auth_status', 'auth_message'])
+                    context.close()
+                    browser.close()
+                    return
+            except Exception:
+                pass
+
+            # 4. Success! Logged in
+            run.auth_status = 'logged_in'
+            run.auth_message = f'Successfully logged in. Re-capturing {auth_shots.count()} pages...'
+            run.save(update_fields=['auth_status', 'auth_message'])
+
+            logger.info(f"Auth success for run {run_id}")
+
+            # Re-capture auth pages
+            captured = 0
+            for shot in auth_shots:
+                new_shot = _capture_page(page, shot.page_url, f"{shot.page_name}_authenticated",
+                                         'desktop', run, competitor, VIEWPORTS['desktop'])
+                captured += 1
+                run.auth_message = f'Re-captured {captured}/{auth_shots.count()} pages...'
+                run.save(update_fields=['auth_message'])
+
+                if new_shot.status == 'auth_required':
+                    new_shot.status = 'auth_failed'
+                    new_shot.save(update_fields=['status'])
+
+            run.auth_message = f'Done. {captured} authenticated pages captured.'
+            run.save(update_fields=['auth_message'])
 
         except Exception as e:
-            logger.error(f"Login failed: {e}")
-            browser.close()
-            return
+            logger.error(f"Auth crawl error: {e}")
+            run.auth_status = 'auth_failed'
+            run.auth_message = f'Error: {str(e)[:300]}'
+            run.save(update_fields=['auth_status', 'auth_message'])
+        finally:
+            try:
+                context.close()
+                browser.close()
+            except Exception:
+                pass
 
-        # Step 2: Re-capture each auth_required page
-        for shot in auth_shots:
-            new_shot = _capture_page(
-                page, shot.page_url, f"{shot.page_name}_authenticated",
-                'desktop', run, competitor, VIEWPORTS['desktop']
-            )
-            # Mark the new shot as authenticated
-            if new_shot.status == 'auth_required':
-                # Still showing login — creds may have failed
-                new_shot.status = 'auth_failed'
-                new_shot.save(update_fields=['status'])
 
-            logger.info(f"Auth crawl: {shot.page_url} -> {new_shot.status}")
+def submit_verification_code(run_id: str):
+    """Submit a verification/2FA code or captcha text to continue authentication."""
+    from apps.runs.models import Run
 
-        context.close()
-        browser.close()
+    run = Run.objects.get(id=run_id)
+    creds = run.auth_credentials
+    if not creds:
+        return
 
-    logger.info(f"Authenticated crawl complete for run {run_id}")
+    code = creds.get('verification_code', '')
+    email = creds.get('email', '')
+    password = creds.get('password', '')
+    login_url = creds.get('login_url', '')
+
+    if not code:
+        return
+
+    auth_shots = RunScreenshot.objects.filter(run=run, status='auth_required')
+    if not auth_shots.exists():
+        return
+
+    competitor = auth_shots.first().competitor
+
+    run.auth_status = 'logging_in'
+    run.auth_message = 'Submitting verification code...'
+    run.save(update_fields=['auth_status', 'auth_message'])
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        context = browser.new_context(viewport=VIEWPORTS['desktop'],
+            user_agent='Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36')
+        page = context.new_page()
+
+        target_login = login_url or f"{competitor.url.rstrip('/')}/login"
+
+        try:
+            # Re-navigate and login again (session is not preserved between calls)
+            page.goto(target_login, wait_until='networkidle', timeout=25000)
+            page.wait_for_timeout(3000)
+
+            # Fill email
+            email_selectors = [
+                'input[type="email"]', 'input[name="email"]', 'input[name="login"]',
+                'input[name="username"]', 'input[name="phone"]',
+                'input[id*="email" i]', 'input[id*="login" i]', 'input[id*="user" i]',
+                'input[placeholder*="email" i]', 'input[placeholder*="логин" i]',
+                'input[autocomplete="email"]', 'input[autocomplete="username"]',
+            ]
+            for sel in email_selectors:
+                try:
+                    el = page.query_selector(sel)
+                    if el and el.is_visible():
+                        el.click()
+                        el.fill(email)
+                        break
+                except Exception:
+                    continue
+
+            # Fill password
+            try:
+                pw_el = page.query_selector('input[type="password"]')
+                if pw_el and pw_el.is_visible():
+                    pw_el.click()
+                    pw_el.fill(password)
+            except Exception:
+                pass
+
+            # Submit login
+            submit_selectors = [
+                'button[type="submit"]', 'input[type="submit"]',
+                'button:has-text("Log in")', 'button:has-text("Sign in")',
+                'button:has-text("Войти")', 'button:has-text("Login")',
+                'button:has-text("Submit")', 'button:has-text("Вход")',
+                'button:has-text("Continue")', 'button:has-text("Продолжить")',
+            ]
+            for sel in submit_selectors:
+                try:
+                    btn = page.query_selector(sel)
+                    if btn and btn.is_visible():
+                        btn.click()
+                        break
+                except Exception:
+                    continue
+
+            page.wait_for_timeout(5000)
+
+            run.auth_message = 'Filling verification code...'
+            run.save(update_fields=['auth_message'])
+
+            # Find and fill the code/captcha input
+            code_filled = False
+            code_selectors = [
+                'input[name*="code" i]', 'input[name*="otp" i]', 'input[name*="token" i]',
+                'input[name*="captcha" i]', 'input[name*="verify" i]',
+                'input[id*="code" i]', 'input[id*="otp" i]', 'input[id*="captcha" i]',
+                'input[placeholder*="code" i]', 'input[placeholder*="код" i]',
+                'input[autocomplete="one-time-code"]',
+            ]
+            for sel in code_selectors:
+                try:
+                    el = page.query_selector(sel)
+                    if el and el.is_visible():
+                        el.click()
+                        el.fill(code)
+                        code_filled = True
+                        break
+                except Exception:
+                    continue
+
+            if not code_filled:
+                # Try short text/number/tel inputs
+                try:
+                    inputs = page.query_selector_all('input[type="text"], input[type="number"], input[type="tel"]')
+                    for inp in inputs:
+                        if inp.is_visible():
+                            ml = inp.get_attribute('maxlength')
+                            if ml and int(ml) <= 8:
+                                inp.fill(code)
+                                code_filled = True
+                                break
+                    # If still not filled, try any visible text input
+                    if not code_filled:
+                        for inp in inputs:
+                            if inp.is_visible():
+                                inp.fill(code)
+                                code_filled = True
+                                break
+                except Exception:
+                    pass
+
+            if not code_filled:
+                run.auth_status = 'auth_failed'
+                run.auth_message = 'Could not find verification code input field'
+                run.save(update_fields=['auth_status', 'auth_message'])
+                browser.close()
+                return
+
+            # Submit the code
+            run.auth_message = 'Submitting verification code...'
+            run.save(update_fields=['auth_message'])
+
+            for sel in submit_selectors:
+                try:
+                    btn = page.query_selector(sel)
+                    if btn and btn.is_visible():
+                        btn.click()
+                        break
+                except Exception:
+                    continue
+            else:
+                try:
+                    page.keyboard.press('Enter')
+                except Exception:
+                    pass
+
+            page.wait_for_timeout(5000)
+
+            # Check if login succeeded
+            try:
+                still_login = page.evaluate('''() => {
+                    const pw = document.querySelector('input[type="password"]');
+                    if (pw && pw.offsetParent !== null) return true;
+                    const text = document.body.innerText.toLowerCase();
+                    return (text.includes('invalid') || text.includes('incorrect') ||
+                            text.includes('wrong') || text.includes('неверн') ||
+                            text.includes('expired') || text.includes('истек'));
+                }''')
+
+                if still_login:
+                    error_msg = page.evaluate('''() => {
+                        const selectors = ['[class*="error" i]', '[class*="alert" i]', '[role="alert"]',
+                                          '[class*="message" i]'];
+                        for (const sel of selectors) {
+                            const el = document.querySelector(sel);
+                            if (el && el.textContent.trim()) return el.textContent.trim().substring(0, 200);
+                        }
+                        return 'Verification failed - code may be incorrect or expired';
+                    }''') or 'Verification failed'
+
+                    run.auth_status = 'auth_failed'
+                    run.auth_message = error_msg
+                    run.save(update_fields=['auth_status', 'auth_message'])
+                    context.close()
+                    browser.close()
+                    return
+            except Exception:
+                pass
+
+            # Success - re-capture pages
+            run.auth_status = 'logged_in'
+            run.auth_message = f'Verification successful. Re-capturing {auth_shots.count()} pages...'
+            run.save(update_fields=['auth_status', 'auth_message'])
+
+            logger.info(f"Verification success for run {run_id}")
+
+            captured = 0
+            for shot in auth_shots:
+                new_shot = _capture_page(page, shot.page_url, f"{shot.page_name}_authenticated",
+                                         'desktop', run, competitor, VIEWPORTS['desktop'])
+                captured += 1
+                run.auth_message = f'Re-captured {captured}/{auth_shots.count()} pages...'
+                run.save(update_fields=['auth_message'])
+
+                if new_shot.status == 'auth_required':
+                    new_shot.status = 'auth_failed'
+                    new_shot.save(update_fields=['status'])
+
+            run.auth_message = f'Done. {captured} authenticated pages captured.'
+            run.save(update_fields=['auth_message'])
+
+        except Exception as e:
+            logger.error(f"Verification code submit error: {e}")
+            run.auth_status = 'auth_failed'
+            run.auth_message = f'Error: {str(e)[:300]}'
+            run.save(update_fields=['auth_status', 'auth_message'])
+        finally:
+            try:
+                context.close()
+                browser.close()
+            except Exception:
+                pass

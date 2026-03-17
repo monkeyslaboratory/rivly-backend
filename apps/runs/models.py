@@ -33,6 +33,9 @@ class Run(models.Model):
     # Credentials for authenticated crawl (encrypted in production, plain for dev)
     auth_credentials = models.JSONField(default=dict, blank=True)
     # {"url": "https://...", "email": "...", "password": "...", "login_url": "..."}
+    auth_status = models.CharField(max_length=30, blank=True, default='')
+    # '', 'logging_in', 'captcha_required', 'code_required', 'logged_in', 'auth_failed'
+    auth_message = models.CharField(max_length=500, blank=True, default='')
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:

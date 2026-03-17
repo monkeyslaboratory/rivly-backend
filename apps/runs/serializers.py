@@ -62,7 +62,7 @@ class RunSerializer(serializers.ModelSerializer):
             'started_at', 'completed_at', 'duration_seconds', 'cost_api_usd',
             'error_log', 'retry_count',
             'screenshots', 'reports', 'overall_scores', 'comparison',
-            'has_auth_pages', 'created_at',
+            'has_auth_pages', 'auth_status', 'auth_message', 'created_at',
         ]
         read_only_fields = ['id', 'created_at']
 
